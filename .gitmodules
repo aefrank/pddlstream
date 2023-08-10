@@ -1,6 +1,9 @@
 [submodule "examples/pybullet/utils"]
 	path = examples/pybullet/utils
-	url = https://github.com/caelan/ss-pybullet
+	url = https://github.com/caelan/ss-pybullet.git
 [submodule "downward"]
 	path = downward
 	url = https://github.com/caelan/downward.git
+[submodule "iGibson"]
+	path = iGibson
+	url = https://github.com/StanfordVL/iGibson.git

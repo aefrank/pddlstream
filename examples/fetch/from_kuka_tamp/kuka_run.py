@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from __future__ import print_function
+import sys
 
 from pddlstream.algorithms.meta import solve, create_parser
 from examples.pybullet.utils.pybullet_tools.kuka_primitives import BodyPose, BodyConf, Command, get_grasp_gen, \
@@ -169,7 +170,7 @@ def main():
     args = parser.parse_args()
     print('Arguments:', args)
 
-    connect(use_gui=True)
+    connect(use_gui=False)
     robot, names, movable = load_world()
     print('Objects:', names)
     saver = WorldSaver()
@@ -186,6 +187,20 @@ def main():
             saver.restore()
     print_solution(solution)
     plan, cost, evaluations = solution
+
+
+    # print()
+    # valstr = lambda obj: "body_paths" if hasattr(obj, "body_paths") else \
+    #                      "value" if hasattr(obj,"value") else \
+    #                      "values"  #if hasattr(obj,"values") 
+    # attrstr = lambda a: f"    {valstr(a)}:  {getattr(a,valstr(a))}\n"
+    # outstr = lambda a: f"{a.__class__.__name__}   \t{a}\n" + attrstr(a)
+    # [
+    #     [print(outstr(a)) for a in p.args if not isinstance(a,int)] 
+    #     for p in plan
+    # ]
+
+
     if (plan is None) or not has_gui():
         disconnect()
         return

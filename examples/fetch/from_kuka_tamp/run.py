@@ -16,8 +16,9 @@ from typing import List, Tuple, Union
 # from igibson.utils.motion_planning_wrapper import MotionPlanningWrapper
 # from igibson.utils.utils import parse_config
 
-from examples.fetch.from_kuka_tamp.fetch_primitives import MyiGibsonSemanticInterface, is_placement
+from examples.fetch.from_kuka_tamp.fetch_primitives import MyiGibsonSemanticInterface
 from examples.pybullet.utils.pybullet_tools.utils import Point, Pose, stable_z
+from pddlstream.language.generator import from_gen_fn
 
 from pddlstream.utils import read
 
@@ -50,7 +51,8 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
 
     robot = ig.robots[0]
     objects = ig.objects 
-    fixed, movable = partition(lambda obj: ig.is_movable(obj), objects)
+    movable = [ig.is_movable(obj) for obj in objects]
+    fixed = [not ig.is_movable(obj) for obj in objects]
 
     # robot = Fetch().name]
 
@@ -73,7 +75,34 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
             if ig.is_placement(body, surface):
                 init += [('Supported', body, pose, surface)]
 
-    [print(state) for state in init]
+    body = movable[0]
+    goal = ('and',
+            ('AtConf', conf),
+            ('Cooked', body),
+    )
+
+    stream_map = {
+        'sample-pose': from_gen_fn(ig.get_stable_gen()),
+        # 'sample-grasp': from_gen_fn(get_grasp_gen(robot, grasp_name)),
+        # 'inverse-kinematics': from_fn(get_ik_fn(robot, fixed, teleport)),
+        # 'plan-free-motion': from_fn(get_free_motion_gen(robot, fixed, teleport)),
+        # 'plan-holding-motion': from_fn(get_holding_motion_gen(robot, fixed, teleport)),
+
+        # 'test-cfree-pose-pose': from_test(get_cfree_pose_pose_test()),
+        # 'test-cfree-approach-pose': from_test(get_cfree_obj_approach_pose_test()),
+        # 'test-cfree-traj-pose': from_test(negate_test(get_movable_collision_test())), #get_cfree_traj_pose_test()),
+
+        # 'TrajCollision': get_movable_collision_test(),
+    }
+
+    stream = stream_map['sample-pose']("celery", "stove")
+    for _ in range(10):
+        sample = stream.__next__()
+        pos, orn = sample[0]
+        print(f"\nPosition:   \t{tuple(pos)}\nOrientation:   \t{tuple(orn)}")
+        
+
+    # return PDDLProblem(domain_pddl, constant_map, stream_pddl, stream_map, init, goal)
 
 
 

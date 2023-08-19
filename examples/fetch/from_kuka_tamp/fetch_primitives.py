@@ -2,11 +2,12 @@ from collections import UserDict
 import functools as ft
 import os
 import sys
-from typing import Any, Generator, List, Tuple, Union
+from typing import Any, Generator, List, Optional, Tuple, Union
 from igibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
 from igibson.action_primitives.starter_semantic_action_primitives import MAX_ATTEMPTS_FOR_SAMPLING_POSE_WITH_OBJECT_AND_PREDICATE, PREDICATE_SAMPLING_Z_OFFSET, UndoableContext
 
 from igibson import object_states
+from igibson.external.pybullet_tools.utils import is_collision_free
 from igibson.object_states.utils import sample_kinematics
 from igibson.objects.object_base import BaseObject
 from igibson.envs.igibson_env import iGibsonEnv
@@ -255,42 +256,99 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             robot.tuck() # tuck arm 
     
     ################################################################################
-
-    
-
-
-    
-
-
-    
-
-
-    
-
-
-    
-    
-
-    
-
-            
-
-
-    
-
     ################################################################################   
 
-    def get_state(self, body:UniqueID, state:str):
+    def get_state(self, body:UniqueID, state:str) -> Any:
         assert state in self._states
         return MyiGibsonSemanticInterface._state_access_map[state][0](self,body)
     
-    def set_state(self, body:UniqueID, state:str, value:Any):
+    def set_state(self, body:UniqueID, state:str, value:Any) -> None:
         assert state in self._states
-        MyiGibsonSemanticInterface._state_access_map[state][1](self, body,value)
+        MyiGibsonSemanticInterface._state_access_map[state][1](self, body, value)
+
+    # ----------------------------------------------------------------------
+
+    def get_pose(self, body:UniqueID) -> Tuple[Position, Orientation]:
+        return self.get_position_orientation(body)
+    
+    def set_pose(self, 
+                 body:UniqueID, 
+                 pose:Optional[Tuple[Position,Orientation]]=None, 
+                 *, 
+                 position:Optional[Position]=None, 
+                 orientation:Optional[Orientation]=None
+                ) -> None:
+        pose_specified = (pose is not None)
+        pos_orn_specified = (position is not None) or (orientation is not None)
+        assert(pose_specified ^ pos_orn_specified), \
+            "must specify either 'pose' xor both 'position' and 'orientation'"
+        pos, orn = pose if pose_specified else (position, orientation)
+        
+        self.set_position_orientation(body, pos, orn)
+
 
     # ----------------------------------------------------------------------
     
-    def sample_placement(self, body:UniqueID, surface:UniqueID, robot:Union[BaseRobot,UniqueID]=None):
+    def is_movable(self, body: UniqueID):
+        obj = self._get_object(body)
+        return not obj.fixed_base
+
+    def is_placement(self, body:UniqueID, surface:UniqueID):
+        body    = self._get_object(body)
+        surface = self._get_object(body)
+        return body.states[object_states.OnTop].get_value(surface)
+    
+    ################################################################################
+
+    def test_cfree_pose(self, 
+                        body:UniqueID, 
+                        pose:Optional[Tuple[Position,Orientation]]=None, 
+                        body2:Optional[UniqueID]=None,
+                        pose2:Optional[Tuple[Position,Orientation]]=None, 
+                        *,
+                        robot:Optional[Union[BaseRobot,UniqueID]]=None
+                        ) -> bool:
+        assert((pose2 is None) or (body2 is not None)), "cannot specify arg 'pose2' without arg 'body2'"
+    
+        if robot is None:
+            robot = self._robot
+        elif isinstance(robot, int):
+            robot = self._robots[robot]
+        elif isinstance(robot, str):
+            robot = self._get_object(robot)
+        assert isinstance(robot, BaseRobot)
+
+        with UndoableContext(robot):
+            
+            body_links = self._get_object(body).get_body_ids()
+            if isinstance(body,str): 
+                body = self._get_bodyids_from_name(body)[0]
+            
+            if body2 is not None:
+                body2_links = self._get_object(body2).get_body_ids()
+                if isinstance(body2,str): 
+                    body2 = self._get_bodyids_from_name(body2)[0]
+            else:
+                body2 = link_b_list = None
+
+            if pose is not None:
+                self.set_position_orientation(body, *pose)
+            if pose2 is not None:
+                self.set_position_orientation(body2, *pose2)
+            
+            return is_collision_free(body_a=body, 
+                                     link_a_list=body_links,
+                                     body_b=body2, 
+                                     link_b_list=body2_links
+                                    )
+        
+        
+    
+    def sample_placement(self, 
+                         body:UniqueID, 
+                         surface:UniqueID, 
+                         robot:Optional[Union[BaseRobot,UniqueID]]=None
+                         ) -> Tuple[Position, Orientation]:
         if robot is None:
             robot = self._robot
         elif isinstance(robot, int):
@@ -333,16 +391,6 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 if placement is not None:
                     yield placement
         return gen
-
-    # def get_stable_gen(fixed=[]):
-    #     def gen(body, surface):
-    #         while True:
-    #             pose = sample_placement(body, surface)
-    #             if (pose is None) or any(pairwise_collision(body, b) for b in fixed):
-    #                 continue
-    #             body_pose = BodyPose(body, pose)
-    #             yield (body_pose,)
-    #     return gen
     
     def get_grasp_gen(self, robot, grasp_name='top'):
         pass
@@ -366,16 +414,12 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         # only using joint position, not velocity
         # return [joint[0] for joint in super().get_joint_states(body)]
 
+    def get_cfree_pose_pose_test(self):
+        return self.test_cfree_pose
+
     ################################################################################
 
-    def is_movable(self, body: UniqueID):
-        obj = self._get_object(body)
-        return not obj.fixed_base
-
-    def is_placement(self, body:UniqueID, surface:UniqueID):
-        body    = self._get_object(body)
-        surface = self._get_object(body)
-        return body.states[object_states.OnTop].get_value(surface)
+    
 
 
 

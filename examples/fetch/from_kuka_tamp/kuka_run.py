@@ -167,10 +167,11 @@ def main():
     parser.add_argument('-enable', action='store_true', help='Enables rendering during planning')
     parser.add_argument('-teleport', action='store_true', help='Teleports between configurations')
     parser.add_argument('-simulate', action='store_true', help='Simulates the system')
+    parser.add_argument('-g','--gui', action='store_true', help='Simulates the system')
     args = parser.parse_args()
     print('Arguments:', args)
 
-    connect(use_gui=False)
+    connect(use_gui=args.gui)
     robot, names, movable = load_world()
     print('Objects:', names)
     saver = WorldSaver()

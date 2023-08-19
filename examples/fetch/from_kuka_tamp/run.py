@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import argparse
 from itertools import filterfalse, tee
 import os
 import sys
@@ -18,7 +19,7 @@ from typing import List, Tuple, Union
 
 from examples.fetch.from_kuka_tamp.fetch_primitives import MyiGibsonSemanticInterface
 from examples.pybullet.utils.pybullet_tools.utils import Point, Pose, stable_z
-from pddlstream.language.generator import from_gen_fn
+from pddlstream.language.generator import from_fn, from_gen_fn, from_test
 
 from pddlstream.utils import read
 
@@ -51,8 +52,8 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
 
     robot = ig.robots[0]
     objects = ig.objects 
-    movable = [ig.is_movable(obj) for obj in objects]
-    fixed = [not ig.is_movable(obj) for obj in objects]
+    movable = [obj for obj in objects if ig.is_movable(obj)]
+    fixed = [obj for obj in objects if not ig.is_movable(obj)]
 
     # robot = Fetch().name]
 
@@ -88,39 +89,31 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
         # 'plan-free-motion': from_fn(get_free_motion_gen(robot, fixed, teleport)),
         # 'plan-holding-motion': from_fn(get_holding_motion_gen(robot, fixed, teleport)),
 
-        # 'test-cfree-pose-pose': from_test(get_cfree_pose_pose_test()),
+        'test-cfree-pose-pose': from_test(ig.get_cfree_pose_pose_test()),
         # 'test-cfree-approach-pose': from_test(get_cfree_obj_approach_pose_test()),
         # 'test-cfree-traj-pose': from_test(negate_test(get_movable_collision_test())), #get_cfree_traj_pose_test()),
 
         # 'TrajCollision': get_movable_collision_test(),
     }
 
-    stream = stream_map['sample-pose']("celery", "stove")
-    for _ in range(10):
-        sample = stream.__next__()
-        pos, orn = sample[0]
-        print(f"\nPosition:   \t{tuple(pos)}\nOrientation:   \t{tuple(orn)}")
+    # _test__sample_pose_stream(stream_map)
+    _test__test_cfree_pose_pose(stream_map)
         
 
     # return PDDLProblem(domain_pddl, constant_map, stream_pddl, stream_map, init, goal)
 
 
 
+def _test__sample_pose_stream(stream_map):
+    stream = stream_map['sample-pose']("celery", "stove")
+    for _ in range(10):
+        sample = next(stream)
+        pos, orn = sample[0]
+        print(f"\nPosition:   \t{tuple(pos)}\nOrientation:   \t{tuple(orn)}")
 
-
-
-
-
-
-
-
-
+def _test__test_cfree_pose_pose(stream_map):
+    print(stream_map['test-cfree-pose-pose']("radish", body2="celery"))
     
-
-
-
-
-
 
 
 
@@ -128,7 +121,9 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
 
 
 def main():
-    headless = True
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-g','--gui', action='store_true', help='Simulates the system')
+    args = parser.parse_args()
 
     dir_path = os.path.dirname(os.path.realpath(__file__))
     config = "fetch_tamp.yaml"
@@ -144,7 +139,7 @@ def main():
     
     iGibson = MyiGibsonSemanticInterface(config_file=config_path, 
                                          objects=objects,
-                                         headless=headless
+                                         headless=args.gui
                                         )
 
         

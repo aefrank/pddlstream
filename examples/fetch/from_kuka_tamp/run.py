@@ -84,7 +84,7 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
 
     stream_map = {
         'sample-pose': from_gen_fn(ig.get_stable_gen()),
-        # 'sample-grasp': from_gen_fn(get_grasp_gen(robot, grasp_name)),
+        'sample-grasp': from_gen_fn(ig.get_grasp_gen(robot)),
         # 'inverse-kinematics': from_fn(get_ik_fn(robot, fixed, teleport)),
         # 'plan-free-motion': from_fn(get_free_motion_gen(robot, fixed, teleport)),
         # 'plan-holding-motion': from_fn(get_holding_motion_gen(robot, fixed, teleport)),
@@ -97,7 +97,8 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
     }
 
     # _test__sample_pose_stream(stream_map)
-    _test__test_cfree_pose_pose(stream_map)
+    # _test__test_cfree_pose_pose(stream_map)
+    _test__sample_grasp_stream(stream_map)
         
 
     # return PDDLProblem(domain_pddl, constant_map, stream_pddl, stream_map, init, goal)
@@ -107,13 +108,33 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
 def _test__sample_pose_stream(stream_map):
     stream = stream_map['sample-pose']("celery", "stove")
     for _ in range(10):
-        sample = next(stream)
-        pos, orn = sample[0]
+        sample = next(stream)[0]
+        pos, orn = sample
         print(f"\nPosition:   \t{tuple(pos)}\nOrientation:   \t{tuple(orn)}")
 
 def _test__test_cfree_pose_pose(stream_map):
-    print(stream_map['test-cfree-pose-pose']("radish", body2="celery"))
+    stream = stream_map['test-cfree-pose-pose']("radish", body2="celery")
+    print(next(stream)[0])
     
+
+def _test__sample_grasp_stream(stream_map):
+    stream = stream_map['sample-grasp']("celery")
+    for _ in range(10):
+        sample = next(stream)[0][0]
+        x,y,z = sample.grasp_pose[0]
+        a,b,c,d = sample.grasp_pose[1]
+        u,v,w = sample.approach_pose[0]
+        p,q,r,s = sample.approach_pose[1]
+        print(
+            f"\nBody Grasp <{sample}>:"
+            f"\n  - Body:           {sample.body.name}"
+            f"\n  - Grasp Pose:     Position: ({x:.2f},{y:.2f},{z:.2f})\t\tOrientation: ({a:.2f},{b:.2f},{c:.2f},{d:.2f}) "
+            f"\n  - Approach pose:  Position: ({u:.2f},{v:.2f},{w:.2f})\t\tOrientation: ({p:.2f},{q:.2f},{r:.2f},{s:.2f}) "
+            f"\n  - Robot:          {sample.robot.name} ({sample.robot.model_name})"
+            f"\n  - Link:           {sample.link}"
+            f"\n  - Index:          {sample.index}"
+        )
+
 
 
 
@@ -139,7 +160,7 @@ def main():
     
     iGibson = MyiGibsonSemanticInterface(config_file=config_path, 
                                          objects=objects,
-                                         headless=args.gui
+                                         headless=(not args.gui)
                                         )
 
         

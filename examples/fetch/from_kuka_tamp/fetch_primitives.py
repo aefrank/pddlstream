@@ -1,30 +1,41 @@
-from collections import UserDict
+from collections import Set, UserDict
 import functools as ft
+from itertools import product
 import os
 import sys
-from typing import Any, Generator, List, Optional, Tuple, Union
-from igibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
-from igibson.action_primitives.starter_semantic_action_primitives import MAX_ATTEMPTS_FOR_SAMPLING_POSE_WITH_OBJECT_AND_PREDICATE, PREDICATE_SAMPLING_Z_OFFSET, UndoableContext
+from typing import Any, Callable, Collection, Generator, Iterator, List, Optional, Tuple, Union
 
+import pybullet as pb
+import numpy as np
+
+from igibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
+from igibson.action_primitives.starter_semantic_action_primitives import GRASP_APPROACH_DISTANCE, MAX_ATTEMPTS_FOR_SAMPLING_POSE_WITH_OBJECT_AND_PREDICATE, PREDICATE_SAMPLING_Z_OFFSET, UndoableContext
 from igibson import object_states
-from igibson.external.pybullet_tools.utils import is_collision_free
+from igibson.external.pybullet_tools.utils import all_between, create_attachment, get_aabb, get_collision_fn, get_custom_limits, get_moving_links, get_self_link_pairs, is_collision_free, link_from_name, pairwise_collision, pairwise_link_collision, set_joint_positions
 from igibson.object_states.utils import sample_kinematics
 from igibson.objects.object_base import BaseObject
 from igibson.envs.igibson_env import iGibsonEnv
 from igibson.robots import BaseRobot
+from igibson.robots.robot_base import RobotLink
 from igibson.scenes.igibson_indoor_scene import URDFObject
 from igibson.utils.assets_utils import get_ig_avg_category_specs
+from igibson.utils.behavior_robot_motion_planning_utils import HAND_MAX_DISTANCE
+from igibson.utils.grasp_planning_utils import get_grasp_poses_for_object
 from igibson.utils.motion_planning_wrapper import MotionPlanningWrapper
 from igibson.utils.utils import parse_config, quatToXYZW
 from transforms3d.euler import euler2quat
 
 from examples.fetch.from_kuka_tamp.object_spec import (
-    ObjectSpec, 
+    ObjectSpec,
+    Orientation3D,
+    Position3D, 
     URDFObjectSpec,
     Orientation, 
     Position,
     UniqueID, 
 )
+from examples.pybullet.utils.pybullet_tools.kuka_primitives import BodyGrasp, BodyPose
+from examples.pybullet.utils.pybullet_tools.utils import Attachment
 
 
 # def handle_object_name(*objargs):
@@ -40,7 +51,17 @@ from examples.fetch.from_kuka_tamp.object_spec import (
 #                     kwargs[oa]
 #             return func(*args, **kwargs)
 
- 
+
+    
+def is_nonstring_iterable(x:Any) -> bool:
+    return hasattr(x, "__iter__") and not isinstance(x, str)
+    
+def nonstring_iterable(x:Any) -> Iterator:
+    if is_nonstring_iterable(x): return iter(x)
+    elif isinstance(x,str): return iter([x])
+    else: return iter(x)
+
+
 
 class iGibsonSemanticInterface:
 
@@ -54,7 +75,7 @@ class iGibsonSemanticInterface:
     def _robots(self) -> List[BaseRobot]:
         return self.env.robots
     @property
-    def robots(self) -> List[BaseRobot]:
+    def robots(self) -> List[str]:
         return [robot.name for robot in self.env.robots]
     @property
     def _objects(self) -> List[BaseObject]:
@@ -65,7 +86,7 @@ class iGibsonSemanticInterface:
 
     # Object querying
     def _get_object(self, obj:Union[UniqueID,BaseObject]) -> BaseObject:
-        assert isinstance(obj,(int,str,BaseObject)), f"Invalid argument 'obj' of type {type(obj)}: {obj}"
+        assert isinstance(obj,(int,str,BaseObject,BaseRobot)), f"Invalid argument 'obj' of type {type(obj)}: {obj}"
         if isinstance(obj, BaseObject): return obj
         elif isinstance(obj,int):       return self._get_object_from_bodyid(obj)
         elif isinstance(obj,str):       return self._get_object_from_name(obj)
@@ -125,32 +146,27 @@ class iGibsonSemanticInterface:
 
 class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
-    _states = ("position", "orientation")
-    _state_access_map = {
-        "position" : (
-            lambda self, body: self.get_position(body), 
-            lambda self, body, val: self.set_position(body,val)
-        ),
-        "orientation" : (
-            lambda self, body: self.get_orientation(body), 
-            lambda self, body,val: ft.partial(self.set_orientation, force_quaternion=True)(body,val)
-        ),
-    }
-    assert set(_states) == set(_state_access_map)
-    
-    @property
-    def robot(self) -> UniqueID:
-        assert len(self.robots)==1
-        return self.robots[0]
-    
     @property
     def _robot(self) -> BaseRobot:
-        assert len(self._robots)==1
+        assert len(self._robots)==1, \
+            f"attribute '_robot' undefined for multi-robot {self.__class__.__name__} containing {len(self._robots)} robots: {self._robots}. "
         return self._robots[0]
+    @property
+    def robot(self) -> UniqueID:
+        assert len(self.robots)==1, \
+            f"attribute 'robot' undefined for multi-robot {self.__class__.__name__} containing robots: {self.robots}. "
+        return self.robots[0]
+
+    @property
+    def _eef(self) -> RobotLink:
+        return self._robot._links[self.eef]
+    @property
+    def eef(self) -> str:
+        return self._robot.eef_link_names[self._robot.default_arm]
 
     ################################################################################
 
-    def __init__(self, config_file:str, objects:List[ObjectSpec], *, headless:bool=True, verbose=True):
+    def __init__(self, config_file:str, objects:Collection[ObjectSpec], *, headless:bool=True, verbose=True):
         self._igibson_setup(config_file=config_file, headless=headless)
         self.load_objects(objects, verbose=verbose)
         self._init_object_state(objects,verbose=verbose)
@@ -226,7 +242,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         # Return obj body_ids
         return sim_obj.get_body_ids()
 
-    def load_objects(self, specifications:List[Union[str,dict]], verbose:bool=True) -> None:
+    def load_objects(self, specifications:Collection[Union[str,dict]], verbose:bool=True) -> None:
         '''Load objects into simulator based on a list of categories.
         ''' 
         body_ids_by_object = {}
@@ -236,7 +252,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             body_ids_by_object[spec["name"]] = body_ids 
         return body_ids_by_object
     
-    def _init_object_state(self, obj_specs:List[ObjectSpec], *, verbose=True) -> None:
+    def _init_object_state(self, obj_specs:Collection[ObjectSpec], *, verbose=True) -> None:
         for spec in obj_specs:
             assert isinstance(spec, dict)
             if not isinstance(spec,ObjectSpec): 
@@ -257,6 +273,19 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     
     ################################################################################
     ################################################################################   
+
+    _states = ("position", "orientation")
+    _state_access_map = {
+        "position" : (
+            lambda self, body: self.get_position(body), 
+            lambda self, body, val: self.set_position(body,val)
+        ),
+        "orientation" : (
+            lambda self, body: self.get_orientation(body), 
+            lambda self, body,val: ft.partial(self.set_orientation, force_quaternion=True)(body,val)
+        ),
+    }
+    assert set(_states) == set(_state_access_map)
 
     def get_state(self, body:UniqueID, state:str) -> Any:
         assert state in self._states
@@ -329,7 +358,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 if isinstance(body2,str): 
                     body2 = self._get_bodyids_from_name(body2)[0]
             else:
-                body2 = link_b_list = None
+                body2 = body2_links = None
 
             if pose is not None:
                 self.set_position_orientation(body, *pose)
@@ -382,6 +411,171 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             pos, orn = obj.get_position_orientation()
             return pos, orn
     
+    def get_collidable_bodies(self, include_robot:Union[bool,UniqueID,BaseRobot]=False):
+        if include_robot is False: # could be the robot's UniqueID
+            disabled_bodies = self._robots
+        elif include_robot is True:
+            disabled_bodies = []
+        else:
+            included = [
+                robot if isinstance(robot,BaseRobot) 
+                else self._get_object(robot)
+                for robot in nonstring_iterable(include_robot)
+            ]
+            disabled_bodies = [robot for robot in self._robots if not robot in included]
+
+        obstacle_ids = [
+            body_id
+            for body_id in self._env.scene.get_body_ids()
+            if  not any(body_id in floor.get_body_ids() for floor in self.env.scene.objects_by_category["floors"])
+            and not any(body_id in  body.get_body_ids() for body  in disabled_bodies)
+        ]
+
+        return obstacle_ids   
+    
+    def get_collisions(self, 
+                       body:UniqueID, 
+                       obstacles:Collection[UniqueID]=[], 
+                       *, 
+                       exclude:Collection[UniqueID]=[], 
+                       critical_obstacles:Collection[UniqueID]=[], 
+                       max_distance:float=HAND_MAX_DISTANCE
+                ) -> List[UniqueID]:
+        if not obstacles and not critical_obstacles:
+            obstacles = [obj for obj in self.objects if not (obj==body or obj in exclude)]
+        obstacles = set(obstacles) - set(exclude)
+
+        close_objects = set(x[0] for x in pb.getOverlappingObjects(*get_aabb(body)))
+        close_obstacles = (close_objects & set(obstacles)) | set(critical_obstacles)
+        collision_ids = [obs for obs in close_obstacles if pairwise_collision(body, obs, max_distance=max_distance)]
+        return collision_ids
+
+    def get_all_collisions(self, body:Union[UniqueID, Collection[UniqueID]], obstacles:Collection[UniqueID], *, critical_obstacles=[], max_distance:float=HAND_MAX_DISTANCE):
+        collisions = {
+            bid : self._get_collision(body=bid, obstacles=obstacles, critical_obstacles=critical_obstacles,max_distance=max_distance) 
+            for bid in nonstring_iterable(body)
+        }
+        return collisions
+
+    
+    def _get_robot_arm_collision_fn(self,
+                                *,
+                                self_collisions:bool=True, 
+                                disabled_collisions={},
+                                allow_collision_links=[], 
+                                **kwargs
+    ):
+        '''Assuming one Fetch robot so we can use MotionPlanningWrapper functionality
+        '''
+        robot = self.robot
+        robot_id = self._motion_planner.robot_id
+        arm = self._motion_planner.arm_joint_ids
+        obstacles = self._motion_planner.mp_obstacles
+
+        disabled_collisions |= robot.disabled_collision_pairs
+        if robot.model_name == "Fetch":
+            disabled_collisions |= {
+                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "torso_fixed_link")),
+                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "shoulder_lift_link")),
+                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "upperarm_roll_link")),
+                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "forearm_roll_link")),
+                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "elbow_flex_link")),
+            }
+
+        
+        # Pair of links within the robot that need to be checked for self-collisions
+        self_collision_pairs = get_self_link_pairs(robot, arm, disabled_collisions) if self_collisions else []
+
+        # List of links that move on the robot and that should be checked for collisions with the obstacles
+        moving_links = frozenset([item for item in get_moving_links(robot, arm) if not item in allow_collision_links])
+        moving_bodies = [(robot, moving_links)]
+        
+        # Joint limits
+        lower_limits, upper_limits = get_custom_limits(robot, arm)
+
+        def arm_collision_fn(pose3d:Tuple[Position3D,Orientation3D], attachments:List[Attachment]=[]):
+            with UndoableContext(self._motion_planner.robot):
+            
+                q = self._motion_planner.get_arm_joint_positions(arm_ik_goal=pose3d)
+                if not all_between(lower_limits, q, upper_limits):
+                    return True
+                
+                set_joint_positions(robot, arm, q)
+                for attachment in attachments:
+                    attachment.assign()
+
+                # Check for self collisions
+                for link1, link2 in iter(self_collision_pairs):
+                    if pairwise_link_collision(robot, link1, robot, link2):
+                        return True
+                
+                # Include attachments as "moving bodies" to be tested for collisions
+                attached_bodies = [attachment.child for attachment in attachments]
+                moving_bodies += attached_bodies
+
+                # Check for collisions of the moving bodies and the obstacles
+                for moving, obs in product(moving_bodies, obstacles):
+                    if pairwise_collision(moving, obs, **kwargs):
+                        return True
+                
+                # No collisions detected
+                return False
+            
+        return arm_collision_fn
+
+    
+
+
+            
+
+    def _get_hand_collision_fn(self, max_distance:float=HAND_MAX_DISTANCE):
+        robot:BaseRobot = self._robot
+        eef:UniqueID = self._eef.body_id
+        non_hand_obstacles:Set[UniqueID] = set(obs for obs in self.get_collidable_bodies(include_robot=True) if (obs != eef))
+        get_close_objects = lambda body_id: set(x[0] for x in pb.getOverlappingObjects(*get_aabb(body_id)))
+        
+        def hand_collision_fn(pose3d, obj_in_hand:Optional[BaseObject]=None, *, report_all_collisions:bool=False, verbose:bool=False):
+                          
+            non_hand_non_oih_obstacles = set(
+                obs
+                for obs in non_hand_obstacles
+                if (obj_in_hand is None) or (obs not in obj_in_hand.get_body_ids())
+            )
+
+            get_close_obstacles = lambda body_id: get_close_objects(body_id) & non_hand_non_oih_obstacles
+            
+            with UndoableContext(robot):
+                robot.set_eef_position_orientation(*pose3d, robot.default_arm)
+                
+                collisions = self.get_collisions(
+                    body=eef,
+                    obstacles=non_hand_non_oih_obstacles, 
+                    max_distance=max_distance
+                )
+                collision = (len(collisions)>0)
+                if collision:
+                    if verbose: 
+                        print("EEF collision with objects: ", collisions)
+                    if not report_all_collisions:
+                        return collision # True
+
+                if obj_in_hand is not None:
+                    [oih_bid] = obj_in_hand.get_body_ids()
+                    oih_collisions = self.get_collisions(
+                        body=oih_bid,
+                        obstacles=non_hand_non_oih_obstacles, 
+                        critical_obstacles=get_close_obstacles(eef.body_id), 
+                        max_distance=max_distance
+                    )
+                    oih_collision = (len(oih_collisions)>0)
+                    if verbose and oih_collision:
+                        print("Held object collision with objects: ", oih_collisions)
+                    collision = collision or oih_collision
+
+            return collision
+
+        return hand_collision_fn
+    
     ################################################################################
     
     def get_stable_gen(self): # -> Generator[Tuple[Position, Orientation], None, None]:
@@ -389,11 +583,28 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             while True:
                 placement = self.sample_placement(body, surface)
                 if placement is not None:
-                    yield placement
+                    yield BodyPose(body, placement)
         return gen
     
-    def get_grasp_gen(self, robot, grasp_name='top'):
-        pass
+      
+    
+    def get_grasp_gen(self, robot:Optional[UniqueID]=None):
+        robot:BaseRobot = self._get_object(robot) if robot is not None else self._robot
+        def gen(body:UniqueID):
+            target_obj:BaseObject = self._get_object(body)
+            grasp_poses:List[Tuple[BodyPose,Orientation]] = get_grasp_poses_for_object(robot=robot, target_obj=target_obj, force_allow_any_extent=False)
+            for grasp_pose, target_orn in grasp_poses:
+                approach_position = grasp_pose[0] + target_orn * GRASP_APPROACH_DISTANCE
+                approach_pose = (approach_position, grasp_pose[1])
+                body_grasp = BodyGrasp(
+                    body=target_obj, 
+                    grasp_pose=grasp_pose,
+                    approach_pose=approach_pose,
+                    robot=robot,
+                    link=robot.eef_link_names[robot.default_arm]
+                )
+                yield (body_grasp,)
+        return gen
 
     def get_tool_link(self, robot):
         pass
@@ -445,185 +656,3 @@ def _as_urdf_spec(spec:Union[str,dict]) -> "URDFObjectSpec":
 
     
     
-
-
-# def sample_placement(body:UniqueID, surface:UniqueID):
-#     placement = sample_kinematics(predicate=object_states.OnTop,
-#                         objA=body,
-#                         objB=surface,
-#                         use_ray_casting_method=True,
-#                         max_trials=MAX_ATTEMPTS_FOR_SAMPLING_POSE_WITH_OBJECT_AND_PREDICATE,
-#                         skip_falling=True,
-#                         z_offset=PREDICATE_SAMPLING_Z_OFFSET,
-#     )
-#     return placement
-
-# def sample_kinematics(
-#     predicate,
-#     objA,
-#     objB,
-#     use_ray_casting_method=False,
-#     max_trials=100,
-#     z_offset=0.05,
-#     skip_falling=False,
-# ):
-#     '''Modified version of igibson/object_states/utils.py
-#     '''
-
-#     sample_on_floor = predicate == "onFloor"
-
-#     if not use_ray_casting_method and not sample_on_floor and predicate not in objB.supporting_surfaces:
-#         return False
-
-#     objA.force_wakeup()
-#     if not sample_on_floor:
-#         objB.force_wakeup()
-
-#     state_id = pb.saveState()
-#     for _ in range(max_trials):
-#         pos = None
-#         if hasattr(objA, "orientations") and objA.orientations is not None:
-#             orientation = objA.sample_orientation()
-#         else:
-#             orientation = [0, 0, 0, 1]
-
-#         # Orientation needs to be set for stable_z_on_aabb to work correctly
-#         # Position needs to be set to be very far away because the object's
-#         # original position might be blocking rays (use_ray_casting_method=True)
-#         old_pos = np.array([200, 200, 200])
-#         objA.set_position_orientation(old_pos, orientation)
-
-#         if sample_on_floor:
-#             _, pos = objB.scene.get_random_point_by_room_instance(objB.room_instance)
-
-#             if pos is not None:
-#                 # Get the combined AABB.
-#                 lower, _ = objA.states[object_states.AABB].get_value()
-#                 # Move the position to a stable Z for the object.
-#                 pos[2] += objA.get_position()[2] - lower[2]
-#         else:
-#             if use_ray_casting_method:
-#                 if predicate == "onTop":
-#                     params = _ON_TOP_RAY_CASTING_SAMPLING_PARAMS
-#                 elif predicate == "inside":
-#                     params = _INSIDE_RAY_CASTING_SAMPLING_PARAMS
-#                 else:
-#                     assert False, "predicate is not onTop or inside: {}".format(predicate)
-
-#                 # Retrieve base CoM frame-aligned bounding box parallel to the XY plane
-#                 parallel_bbox_center, parallel_bbox_orn, parallel_bbox_extents, _ = objA.get_base_aligned_bounding_box(
-#                     xy_aligned=True
-#                 )
-
-#                 # TODO: Get this to work with non-URDFObject objects.
-#                 sampling_results = sampling_utils.sample_cuboid_on_object(
-#                     objB,
-#                     num_samples=1,
-#                     cuboid_dimensions=parallel_bbox_extents,
-#                     axis_probabilities=[0, 0, 1],
-#                     refuse_downwards=True,
-#                     undo_padding=True,
-#                     **params,
-#                 )
-
-#                 sampled_vector = sampling_results[0][0]
-#                 sampled_quaternion = sampling_results[0][2]
-
-#                 sampling_success = sampled_vector is not None
-#                 if sampling_success:
-#                     # Move the object from the original parallel bbox to the sampled bbox
-#                     parallel_bbox_rotation = R.from_quat(parallel_bbox_orn)
-#                     sample_rotation = R.from_quat(sampled_quaternion)
-#                     original_rotation = R.from_quat(orientation)
-
-#                     # The additional orientation to be applied should be the delta orientation
-#                     # between the parallel bbox orientation and the sample orientation
-#                     additional_rotation = sample_rotation * parallel_bbox_rotation.inv()
-#                     combined_rotation = additional_rotation * original_rotation
-#                     orientation = combined_rotation.as_quat()
-
-#                     # The delta vector between the base CoM frame and the parallel bbox center needs to be rotated
-#                     # by the same additional orientation
-#                     diff = old_pos - parallel_bbox_center
-#                     rotated_diff = additional_rotation.apply(diff)
-#                     pos = sampled_vector + rotated_diff
-#             else:
-#                 random_idx = np.random.randint(len(objB.supporting_surfaces[predicate].keys()))
-#                 body_id, link_id = list(objB.supporting_surfaces[predicate].keys())[random_idx]
-#                 random_height_idx = np.random.randint(len(objB.supporting_surfaces[predicate][(body_id, link_id)]))
-#                 height, height_map = objB.supporting_surfaces[predicate][(body_id, link_id)][random_height_idx]
-#                 obj_half_size = np.max(objA.bounding_box) / 2 * 100
-#                 obj_half_size_scaled = np.array([obj_half_size / objB.scale[1], obj_half_size / objB.scale[0]])
-#                 obj_half_size_scaled = np.ceil(obj_half_size_scaled).astype(int)
-#                 height_map_eroded = cv2.erode(height_map, np.ones(obj_half_size_scaled, np.uint8))
-
-#                 valid_pos = np.array(height_map_eroded.nonzero())
-#                 if valid_pos.shape[1] != 0:
-#                     random_pos_idx = np.random.randint(valid_pos.shape[1])
-#                     random_pos = valid_pos[:, random_pos_idx]
-#                     y_map, x_map = random_pos
-#                     y = y_map / 100.0 - 2
-#                     x = x_map / 100.0 - 2
-#                     z = height
-
-#                     pos = np.array([x, y, z])
-#                     pos *= objB.scale
-
-#                     # the supporting surface is defined w.r.t to the link frame, not
-#                     # the inertial frame
-#                     if link_id == -1:
-#                         link_pos, link_orn = pb.getBasePositionAndOrientation(body_id)
-#                         dynamics_info = pb.getDynamicsInfo(body_id, -1)
-#                         inertial_pos = dynamics_info[3]
-#                         inertial_orn = dynamics_info[4]
-#                         inv_inertial_pos, inv_inertial_orn = pb.invertTransform(inertial_pos, inertial_orn)
-#                         link_pos, link_orn = pb.multiplyTransforms(
-#                             link_pos, link_orn, inv_inertial_pos, inv_inertial_orn
-#                         )
-#                     else:
-#                         link_pos, link_orn = get_link_pose(body_id, link_id)
-#                     pos = matrix_from_quat(link_orn).dot(pos) + np.array(link_pos)
-#                     # Get the combined AABB.
-#                     lower, _ = objA.states[object_states.AABB].get_value()
-#                     # Move the position to a stable Z for the object.
-#                     pos[2] += objA.get_position()[2] - lower[2]
-
-#         if pos is None:
-#             success = False
-#         else:
-#             pos[2] += z_offset
-#             objA.set_position_orientation(pos, orientation)
-#             success = not any(detect_closeness(bid) for bid in objA.get_body_ids())
-
-#         if igibson.debug_sampling:
-#             print("sample_kinematics", success)
-#             embed()
-
-
-
-#         if success:
-#             break
-#         else:
-#             restoreState(state_id)
-
-#     pb.removeState(state_id)
-
-#     if success:
-#         if not skip_falling:
-#             objA.set_position_orientation(pos, orientation)
-
-#             # Let it fall for 0.2 second
-#             physics_timestep = pb.getPhysicsEngineParameters()["fixedTimeStep"]
-#             for _ in range(int(0.2 / physics_timestep)):
-#                 pb.stepSimulation()
-#                 if any(detect_collision_with_others(bid) for bid in objA.get_body_ids()):
-#                     break
-
-#         pose = objA.get_position_orientation()
-#     else:
-#         pose = None
-    
-#     restoreState(state_id)
-#     return pose
-
-

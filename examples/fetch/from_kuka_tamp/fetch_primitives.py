@@ -1,4 +1,5 @@
-from collections import Set, UserDict
+from collections.abc import Set
+from collections import UserDict
 import functools as ft
 from itertools import product
 import os
@@ -34,8 +35,15 @@ from examples.fetch.from_kuka_tamp.object_spec import (
     Position,
     UniqueID, 
 )
-from examples.pybullet.utils.pybullet_tools.kuka_primitives import BodyGrasp, BodyPose
-from examples.pybullet.utils.pybullet_tools.utils import Attachment
+from examples.pybullet.utils.pybullet_tools.kuka_primitives import (
+    Attach,
+    BodyGrasp,
+    BodyPath, 
+    BodyPose,
+    Command,
+    get_ik_fn, 
+)
+from examples.pybullet.utils.pybullet_tools.utils import Attachment, approach_from_grasp, end_effector_from_body, get_joint_positions, get_sample_fn, inverse_kinematics_helper, plan_direct_joint_motion, plan_joint_motion, plan_waypoints_joint_motion
 
 
 # def handle_object_name(*objargs):
@@ -69,7 +77,7 @@ class iGibsonSemanticInterface:
         self._env = env
 
     @property
-    def env(self) -> List[iGibsonEnv]:
+    def env(self) -> iGibsonEnv:
         return self._env
     @property
     def _robots(self) -> List[BaseRobot]:
@@ -109,8 +117,8 @@ class iGibsonSemanticInterface:
     
     def _get_name_from_bodyid(self, body_id:int) -> str:
         assert isinstance(body_id,int), f"Invalid argument 'body_id' of type {type(body_id)}: {body_id}"
-        return self.env.scene.objects_by_id[body_id]
-
+        return self.env.scene.objects_by_id[body_id].name
+        
 
     # Position getter/setter
     def get_position(self, body:UniqueID) -> Position:
@@ -411,7 +419,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             pos, orn = obj.get_position_orientation()
             return pos, orn
     
-    def get_collidable_bodies(self, include_robot:Union[bool,UniqueID,BaseRobot]=False):
+    def get_collidable_body_ids(self, include_robot:Union[bool,UniqueID,BaseRobot]=False):
         if include_robot is False: # could be the robot's UniqueID
             disabled_bodies = self._robots
         elif include_robot is True:
@@ -597,20 +605,107 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 approach_position = grasp_pose[0] + target_orn * GRASP_APPROACH_DISTANCE
                 approach_pose = (approach_position, grasp_pose[1])
                 body_grasp = BodyGrasp(
-                    body=target_obj, 
+                    body=self._get_bodyids_from_obj(target_obj)[0], 
                     grasp_pose=grasp_pose,
                     approach_pose=approach_pose,
-                    robot=robot,
-                    link=robot.eef_link_names[robot.default_arm]
+                    robot=self._get_bodyids_from_obj(robot)[0],
+                    link=robot.eef_links[robot.default_arm].link_id
                 )
                 yield (body_grasp,)
         return gen
 
-    def get_tool_link(self, robot):
-        pass
 
-    def get_ik_fn(self, robot, fixed=[], teleport=False, num_attempts=10):
-        pass
+    # def get_ik_fn(self, fixed:Optional[List[UniqueID]]=None):
+    #     robot = self._get_bodyids_from_name(self.robot)[0]
+    #     obstacles = [self._get_bodyids_from_name(f)[0] for f in fixed] \
+    #                 if fixed is not None \
+    #                 else self.get_collidable_body_ids()
+    #     print('ROBOT    \t\t', robot)
+    #     print('OBSTACLES\t\t', obstacles)
+    #     print()
+    #     _fn = get_ik_fn(robot, obstacles)
+    #     def fn(body:str, grasp:BodyGrasp):
+    #         body = self._get_bodyids_from_name(body)[0]
+    #         pose = BodyPose(body, self.get_pose(body))
+    #         print('BODY    \t\t',body)
+    #         print('POSE    \t\t',pose.body, pose.pose)
+    #         x,y,z = grasp.grasp_pose[0]
+    #         a,b,c,d = grasp.grasp_pose[1]
+    #         u,v,w = grasp.approach_pose[0]
+    #         p,q,r,s = grasp.approach_pose[1]
+    #         grasp_body = self._get_name_from_bodyid(grasp.body)
+    #         grasp_robot = self._get_name_from_bodyid(grasp.robot)
+    #         # R = self._get_object_from_bodyid(grasp.robot)
+    #         print(
+    #             f"\nBody Grasp <{grasp}>:"
+    #             f"\n  - Body:           name: {grasp_body}\tBID: {grasp.body}"
+    #             f"\n  - Grasp Pose:     Position: ({x:.2f},{y:.2f},{z:.2f})    \tOrientation: ({a:.2f},{b:.2f},{c:.2f},{d:.2f}) "
+    #             f"\n  - Approach pose:  Position: ({u:.2f},{v:.2f},{w:.2f})    \tOrientation: ({p:.2f},{q:.2f},{r:.2f},{s:.2f}) "
+    #             f"\n  - Robot:          name: {grasp_robot}\tBID: {grasp.robot}"
+    #             f"\n  - Link:           {grasp.link}"
+    #             f"\n  - Index:          {grasp.index}"
+    #         )
+    #         print()
+    #         return _fn(body, pose, grasp)
+    #     return fn
+
+
+    def get_grasp_plan_fn(self, num_attempts=10):
+        robot_id = self._motion_planner.robot_id
+        joint_ids = self._motion_planner.arm_joint_ids
+        max_limits, min_limits, rest_position, joint_range, joint_damping = self._motion_planner.get_ik_parameters()
+        
+        def fn(target:str, grasp:BodyGrasp) -> Optional[Command]:
+            '''Calculate the actions needed to grasp the target object.
+            
+            Returns a tuple of a nearby 'approach' position for initiating the grasp, and
+            a Command object containing a BodyPath from the approach to the grasp configuration, 
+            an Attach action, and then the reversed BodyPath back to the approach pose; 
+            or None if no valid path could be found in the number of attempts specified.
+            '''
+            with UndoableContext(self._robot):
+                eef_id = grasp.link
+                target_id = self._get_bodyids_from_name(target)[0]
+
+                ### Get joint angles for desired grasp pose
+                grasp_pose = end_effector_from_body(self.get_pose(target), grasp.grasp_pose)
+                grasp_position, grasp_orientation = grasp_pose
+                # IK
+                grasp_config = pb.calculateInverseKinematics(
+                    robot_id,
+                    eef_id,
+                    targetPosition=grasp_position,
+                    targetOrientation=grasp_orientation,
+                    lowerLimits=min_limits,
+                    upperLimits=max_limits,
+                    jointRanges=joint_range,
+                    restPoses=rest_position,
+                    jointDamping=joint_damping,
+                    # solver=p.IK_DLS,
+                    maxNumIterations=100,
+                )
+                # Extract joint angles from full configuration
+                grasp_config = tuple(np.array(grasp_config)[self._motion_planner.robot_arm_indices])
+                
+                ### Get joint angles for start configuration from grasp approach pose 
+                approach_pose = approach_from_grasp(grasp.approach_pose, grasp_pose)
+                approach_position, _ = approach_pose # we don't need to constrain orientation for approach pose
+                approach_config = tuple(self._motion_planner.get_arm_joint_positions(approach_position))
+
+                # Confirm a collision-free path exists from approach to grasp config
+                for _ in range(num_attempts):
+                    set_joint_positions(robot_id, joint_ids, approach_config)
+                    path = self._motion_planner.plan_arm_motion(arm_joint_positions=grasp_config)
+                    
+                    if path is not None:
+                        command = Command([ BodyPath(robot_id, path),
+                                            Attach(target_id, robot_id, grasp.link),
+                                            BodyPath(robot_id, path[::-1], attachments=[grasp])])
+                        return (approach_config, command)
+        return fn
+
+            
+
 
     def get_free_motion_gen(self, robot, fixed=[], teleport=False, self_collisions=True):
         pass

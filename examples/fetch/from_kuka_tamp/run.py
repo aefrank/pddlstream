@@ -19,6 +19,7 @@ from typing import List, Tuple, Union
 
 from examples.fetch.from_kuka_tamp.fetch_primitives import MyiGibsonSemanticInterface
 from examples.pybullet.utils.pybullet_tools.utils import Point, Pose, stable_z
+from examples.pybullet.utils.pybullet_tools.kuka_primitives import Attach, BodyPath, get_ik_fn
 from pddlstream.language.generator import from_fn, from_gen_fn, from_test
 
 from pddlstream.utils import read
@@ -84,8 +85,8 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
 
     stream_map = {
         'sample-pose': from_gen_fn(ig.get_stable_gen()),
-        'sample-grasp': from_gen_fn(ig.get_grasp_gen(robot)),
-        # 'inverse-kinematics': from_fn(get_ik_fn(robot, fixed, teleport)),
+        'sample-grasp': from_gen_fn(ig.get_grasp_gen()),
+        'inverse-kinematics': from_fn(ig.get_grasp_plan_fn()),
         # 'plan-free-motion': from_fn(get_free_motion_gen(robot, fixed, teleport)),
         # 'plan-holding-motion': from_fn(get_holding_motion_gen(robot, fixed, teleport)),
 
@@ -98,7 +99,8 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
 
     # _test__sample_pose_stream(stream_map)
     # _test__test_cfree_pose_pose(stream_map)
-    _test__sample_grasp_stream(stream_map)
+    # _test__sample_grasp_stream(ig, stream_map)
+    _test__ik_stream(ig, stream_map, 'celery')
         
 
     # return PDDLProblem(domain_pddl, constant_map, stream_pddl, stream_map, init, goal)
@@ -117,24 +119,51 @@ def _test__test_cfree_pose_pose(stream_map):
     print(next(stream)[0])
     
 
-def _test__sample_grasp_stream(stream_map):
+def _test__sample_grasp_stream(ig, stream_map):
     stream = stream_map['sample-grasp']("celery")
     for _ in range(10):
-        sample = next(stream)[0][0]
-        x,y,z = sample.grasp_pose[0]
-        a,b,c,d = sample.grasp_pose[1]
-        u,v,w = sample.approach_pose[0]
-        p,q,r,s = sample.approach_pose[1]
+        grasp = next(stream)[0][0]
+        x,y,z = grasp.grasp_pose[0]
+        a,b,c,d = grasp.grasp_pose[1]
+        u,v,w = grasp.approach_pose[0]
+        p,q,r,s = grasp.approach_pose[1]
+        grasp_body = ig._get_name_from_bodyid(grasp.body)
+        grasp_robot = ig._get_name_from_bodyid(grasp.robot)
         print(
-            f"\nBody Grasp <{sample}>:"
-            f"\n  - Body:           {sample.body.name}"
-            f"\n  - Grasp Pose:     Position: ({x:.2f},{y:.2f},{z:.2f})\t\tOrientation: ({a:.2f},{b:.2f},{c:.2f},{d:.2f}) "
-            f"\n  - Approach pose:  Position: ({u:.2f},{v:.2f},{w:.2f})\t\tOrientation: ({p:.2f},{q:.2f},{r:.2f},{s:.2f}) "
-            f"\n  - Robot:          {sample.robot.name} ({sample.robot.model_name})"
-            f"\n  - Link:           {sample.link}"
-            f"\n  - Index:          {sample.index}"
+            f"\nBody Grasp <{grasp}>:"
+            f"\n  - Body:           name: {grasp_body}\tBID: {grasp.body}"
+            f"\n  - Grasp Pose:     Position: ({x:.2f},{y:.2f},{z:.2f})    \tOrientation: ({a:.2f},{b:.2f},{c:.2f},{d:.2f}) "
+            f"\n  - Approach pose:  Position: ({u:.2f},{v:.2f},{w:.2f})    \tOrientation: ({p:.2f},{q:.2f},{r:.2f},{s:.2f}) "
+            f"\n  - Robot:          name: {grasp_robot}\tBID: {grasp.robot}"
+            f"\n  - Link:           {grasp.link}"
+            f"\n  - Index:          {grasp.index}"
         )
+        
 
+def _test__ik_stream(ig, stream_map, target):
+    grasp = next(stream_map['sample-grasp'](target))[0][0]
+    stream = stream_map['inverse-kinematics'](target, grasp)
+    for _ in range(1):
+        sample = next(stream)[0]
+        config, command = sample
+        print(f"\nConfiguration:   \t{[round(q,3) for q in config]}")
+        print(
+            f"\nCommand <{command}>:"
+        )
+        for i,cmd in enumerate(command.body_paths):
+            prefix = f"  {i}) {cmd.__class__.__name__}"
+            if isinstance(cmd,BodyPath):
+                string = f"\n\t - Body: {ig._get_name_from_bodyid(cmd.body)}" \
+                         f"\n\t - {len(cmd.path)} waypoints" \
+                         f"\n\t - {len(cmd.joints)} joints" \
+                         f"\n\t - Attachments: {[ig._get_name_from_bodyid(g.body) for g in cmd.attachments]}"
+            elif isinstance(cmd, Attach):
+                string = f"\n\t - Robot: {ig._get_name_from_bodyid(cmd.robot)}" \
+                         f" (link={cmd.link})" \
+                         f"\n\t - Target: {ig._get_name_from_bodyid(cmd.body)}" \
+
+                
+            print(prefix+string)
 
 
 

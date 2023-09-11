@@ -87,7 +87,7 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
         'sample-pose': from_gen_fn(ig.get_stable_gen()),
         'sample-grasp': from_gen_fn(ig.get_grasp_gen()),
         'inverse-kinematics': from_fn(ig.get_grasp_plan_fn()),
-        # 'plan-free-motion': from_fn(get_free_motion_gen(robot, fixed, teleport)),
+        'plan-free-motion': from_fn(ig.get_free_motion_gen()),
         # 'plan-holding-motion': from_fn(get_holding_motion_gen(robot, fixed, teleport)),
 
         'test-cfree-pose-pose': from_test(ig.get_cfree_pose_pose_test()),
@@ -97,14 +97,67 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
         # 'TrajCollision': get_movable_collision_test(),
     }
 
+    target = "celery"
+
     # _test__sample_pose_stream(stream_map)
     # _test__test_cfree_pose_pose(stream_map)
     # _test__sample_grasp_stream(ig, stream_map)
-    _test__ik_stream(ig, stream_map, 'celery')
-        
+    _test__ik_stream(ig, stream_map, target)
+
+    
+
+def _temp_test(ig, target):
+    q_start = ig.get_arm_config()
+    print("Initial arm config: ", ig._fmt_num_iter(q_start))
+    print("Direct-to-target config: ", ig._fmt_num_iter(ig.arm_ik(*ig.get_pose(target))))
+
+    grasp_gen = ig.get_grasp_gen()(target)
+
+    path = [None,None]
+    while not all(path):
+        q_approach = q_grasp = None
+        while not all((q_approach, q_grasp)):
+            grasp = next(grasp_gen)[0]
+            print_BodyGrasp(ig, grasp)
+            q_approach = ig.arm_ik(*grasp.approach_pose)
+            q_grasp = ig.arm_ik(*grasp.grasp_pose)
+        print("Approach config: ", ig._fmt_num_iter(q_approach))
+        print("Grasp config:", ig._fmt_num_iter(q_grasp))
+
+        ig.set_arm_config(q_start)
+        path[0] = ig._motion_planner.plan_arm_motion(q_approach)
+        ig.set_arm_config(q_approach)
+        path[1] = ig._motion_planner.plan_arm_motion(q_grasp)
+    try:
+        print("Start-to-Approach:")
+        print([ig._fmt_num_iter(q) for q in path[0]])   
+    except:
+        print("Start-to-Approach:")
+        print(path[0])
+    try:
+        print("Approach-to-Grasp:")
+        print([ig._fmt_num_iter(q) for q in path[1]])   
+    except:
+        print("Approach-to-Grasp:")
+        print(path[1])
 
     # return PDDLProblem(domain_pddl, constant_map, stream_pddl, stream_map, init, goal)
-
+def print_BodyGrasp(ig, grasp):
+    x,y,z = grasp.grasp_pose[0]
+    a,b,c,d = grasp.grasp_pose[1]
+    u,v,w = grasp.approach_pose[0]
+    p,q,r,s = grasp.approach_pose[1]
+    grasp_body = ig.get_name(grasp.body)
+    grasp_robot = ig.get_name(grasp.robot)
+    print(
+        f"\nBody Grasp <{grasp}>:"
+        f"\n  - Body:           name: {grasp_body}\tBID: {grasp.body}"
+        f"\n  - Grasp Pose:     Position: ({x:.2f},{y:.2f},{z:.2f})    \tOrientation: ({a:.2f},{b:.2f},{c:.2f},{d:.2f}) "
+        f"\n  - Approach pose:  Position: ({u:.2f},{v:.2f},{w:.2f})    \tOrientation: ({p:.2f},{q:.2f},{r:.2f},{s:.2f}) "
+        f"\n  - Robot:          name: {grasp_robot}\tBID: {grasp.robot}"
+        f"\n  - Link:           {grasp.link}"
+        f"\n  - Index:          {grasp.index}"
+    )
 
 
 def _test__sample_pose_stream(stream_map):
@@ -123,28 +176,18 @@ def _test__sample_grasp_stream(ig, stream_map):
     stream = stream_map['sample-grasp']("celery")
     for _ in range(10):
         grasp = next(stream)[0][0]
-        x,y,z = grasp.grasp_pose[0]
-        a,b,c,d = grasp.grasp_pose[1]
-        u,v,w = grasp.approach_pose[0]
-        p,q,r,s = grasp.approach_pose[1]
-        grasp_body = ig._get_name_from_bodyid(grasp.body)
-        grasp_robot = ig._get_name_from_bodyid(grasp.robot)
-        print(
-            f"\nBody Grasp <{grasp}>:"
-            f"\n  - Body:           name: {grasp_body}\tBID: {grasp.body}"
-            f"\n  - Grasp Pose:     Position: ({x:.2f},{y:.2f},{z:.2f})    \tOrientation: ({a:.2f},{b:.2f},{c:.2f},{d:.2f}) "
-            f"\n  - Approach pose:  Position: ({u:.2f},{v:.2f},{w:.2f})    \tOrientation: ({p:.2f},{q:.2f},{r:.2f},{s:.2f}) "
-            f"\n  - Robot:          name: {grasp_robot}\tBID: {grasp.robot}"
-            f"\n  - Link:           {grasp.link}"
-            f"\n  - Index:          {grasp.index}"
-        )
+        
         
 
 def _test__ik_stream(ig, stream_map, target):
     grasp = next(stream_map['sample-grasp'](target))[0][0]
+    print_BodyGrasp(ig, grasp)
     stream = stream_map['inverse-kinematics'](target, grasp)
     for _ in range(1):
         sample = next(stream)[0]
+        if not sample:
+            print(f"IK failed: {sample}")
+            return
         config, command = sample
         print(f"\nConfiguration:   \t{[round(q,3) for q in config]}")
         print(

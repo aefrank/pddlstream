@@ -56,16 +56,12 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
     movable = [obj for obj in objects if ig.is_movable(obj)]
     fixed = [obj for obj in objects if not ig.is_movable(obj)]
 
-    # robot = Fetch().name]
-
-    
     conf = ig.get_joint_states(robot)
     init = [('CanMove',),
             ('Conf', conf),
             ('AtConf', conf),
             ('HandEmpty',)]
     
-
     for body in movable:
         pose = (ig.get_position(body), ig.get_orientation(body)) # body.get_base_link_position_orientation()
         init += [('Graspable', body),
@@ -86,7 +82,7 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
     stream_map = {
         'sample-pose': from_gen_fn(ig.get_stable_gen()),
         'sample-grasp': from_gen_fn(ig.get_grasp_gen()),
-        'inverse-kinematics': from_fn(ig.get_grasp_plan_fn()),
+        'inverse-kinematics': from_fn(ig.get_grasp_traj_fn()),
         'plan-free-motion': from_fn(ig.get_free_motion_gen()),
         # 'plan-holding-motion': from_fn(get_holding_motion_gen(robot, fixed, teleport)),
 
@@ -99,12 +95,129 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
 
     target = "celery"
 
-    # _test__sample_pose_stream(stream_map)
-    # _test__test_cfree_pose_pose(stream_map)
-    # _test__sample_grasp_stream(ig, stream_map)
+    _test__sample_pose_stream(stream_map)
+    _test__test_cfree_pose_pose(stream_map)
+    _test__sample_grasp_stream(ig, stream_map)
     _test__ik_stream(ig, stream_map, target)
+    _test__plan_free_motion_stream(ig, init, stream_map)
 
     
+def _test__plan_free_motion_stream(ig:MyiGibsonSemanticInterface, state, stream_map:dict):
+    atpose_fluents = [fluent for fluent in state if fluent[0].lower()=='atpose']
+    print("AtPose Fluents: ", [(name, obj, tuple(ig._fmt_num_iter(p) for p in pose)) for name,obj,pose in atpose_fluents])
+    grasp = next(stream_map['sample-grasp']("celery"))[0][0]
+
+    q1 = ig.get_arm_config()
+    p1 = ig.get_pose(ig.eef_id)
+    p2 = (grasp.approach_pose[0], None)
+    q2 = ig.arm_ik(*p2)
+    p3 = grasp.grasp_pose
+    q3 = ig.arm_ik(*p3)
+
+    print(f"Start:  Config:  {ig._fmt_num_iter(q1)} \tPose:  {'  '.join(ig._fmt_num_iter(p) for p in p1 if p is not None)}")
+    print(f"Goal:   Config:  {ig._fmt_num_iter(q2)} \tPose:  {'  '.join(ig._fmt_num_iter(p) for p in p2 if p is not None)}")
+    # print("Goal config: ", ig._fmt_num_iter(q2))
+    stream = stream_map['plan-free-motion'](q1, q2, atpose_fluents=atpose_fluents)
+    command = next(stream)[0][0]
+    print_Command(ig, command)
+
+    print("\n")
+    
+    print(f"Start:  Config:  {ig._fmt_num_iter(q2)} \tPose:  {'  '.join(ig._fmt_num_iter(p) for p in p2 if p is not None)}")
+    print(f"Goal:   Config:  {ig._fmt_num_iter(q3)} \tPose:  {'  '.join(ig._fmt_num_iter(p) for p in p3 if p is not None)}")
+    stream = stream_map['plan-free-motion'](q2, q3, atpose_fluents=atpose_fluents)
+    command = next(stream)[0][0]
+    print_Command(ig, command)
+    
+    
+    
+    
+    
+
+def _test__sample_pose_stream(stream_map):
+    stream = stream_map['sample-pose']("celery", "stove")
+    for _ in range(10):
+        sample = next(stream)[0]
+        pos, orn = sample.pose
+        print(f"\nPosition:   \t{tuple(pos)}\nOrientation:   \t{tuple(orn)}")
+
+def _test__test_cfree_pose_pose(stream_map):
+    stream = stream_map['test-cfree-pose-pose']("radish", body2="celery")
+    print(next(stream)[0])
+    
+def _test__sample_grasp_stream(ig, stream_map):
+    stream = stream_map['sample-grasp']("celery")
+    for _ in range(10):
+        grasp = next(stream)[0][0]
+
+def _test__ik_stream(ig, stream_map, target):
+    grasp = next(stream_map['sample-grasp'](target))[0][0]
+    print_BodyGrasp(ig, grasp)
+    stream = stream_map['inverse-kinematics'](target, grasp)
+    for _ in range(1):
+        sample = next(stream)[0]
+        if not sample:
+            print(f"IK failed: {sample}")
+            return
+        config, command = sample
+        print_Conf(ig, config)
+        print_Command(ig, command)
+
+        # print(f"\nConfiguration:   \t{[round(q,3) for q in config]}")
+        # print(
+        #     f"\nCommand <{command}>:"
+        # )
+        # for i,cmd in enumerate(command.body_paths):
+        #     prefix = f"  {i}) {cmd.__class__.__name__}"
+        #     if isinstance(cmd,BodyPath):
+        #         string = f"\n\t - Body: {ig.get_name(cmd.body)}" \
+        #                  f"\n\t - {len(cmd.path)} waypoints" \
+        #                  f"\n\t - {len(cmd.joints)} joints" \
+        #                  f"\n\t - Attachments: {[ig.get_name(g.body) for g in cmd.attachments]}"
+        #     elif isinstance(cmd, Attach):
+        #         string = f"\n\t - Robot: {ig.get_name(cmd.robot)}" \
+        #                  f" (link={cmd.link})" \
+        #                  f"\n\t - Target: {ig.get_name(cmd.body)}" \
+
+                
+        #     print(prefix+string)
+
+
+
+#######################################################
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-g','--gui', action='store_true', help='Simulates the system')
+    args = parser.parse_args()
+
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    config = "fetch_tamp.yaml"
+    config_path = os.path.join(dir_path,config)
+
+    objects = [
+        {'category':'sink',     'position':Point(-0.5,0,0), 'fixed_base':True}, 
+        {'category':'stove',    'position':Point(+0.5,0,0), 'fixed_base':True}, 
+        {'category':'celery',   'position':Point(0,+0.5,0), 'fixed_base':False}, 
+        {'category':'radish',   'position':Point(0,-0.5,0), 'fixed_base':False}
+    ]
+    movable = ['celery', 'radish']
+    
+    iGibson = MyiGibsonSemanticInterface(config_file=config_path, 
+                                         objects=objects,
+                                         headless=(not args.gui)
+                                        )
+
+        
+
+
+    pddlstream_from_problem(ig=iGibson, movable=movable)
+   
+    iGibson.env.close()
+
+
+
 
 def _temp_test(ig, target):
     q_start = ig.get_arm_config()
@@ -142,6 +255,12 @@ def _temp_test(ig, target):
         print(path[1])
 
     # return PDDLProblem(domain_pddl, constant_map, stream_pddl, stream_map, init, goal)
+
+
+
+def print_Conf(ig, conf):
+    print(f"\nConfiguration:   \t{ig._fmt_num_iter(conf)}")
+
 def print_BodyGrasp(ig, grasp):
     x,y,z = grasp.grasp_pose[0]
     a,b,c,d = grasp.grasp_pose[1]
@@ -159,91 +278,24 @@ def print_BodyGrasp(ig, grasp):
         f"\n  - Index:          {grasp.index}"
     )
 
+def print_Command(ig, command):
+    print(
+        f"\nCommand <{command}>:"
+    )
+    for i,cmd in enumerate(command.body_paths):
+        prefix = f"  {i}) {cmd.__class__.__name__}"
+        if isinstance(cmd,BodyPath):
+            string = f"\n\t - Body: {ig.get_name(cmd.body)}" \
+                        f"\n\t - {len(cmd.path)} waypoints" \
+                        f"\n\t - {len(cmd.joints)} joints" \
+                        f"\n\t - Attachments: {[ig.get_name(g.body) for g in cmd.attachments]}"
+        elif isinstance(cmd, Attach):
+            string = f"\n\t - Robot: {ig.get_name(cmd.robot)}" \
+                        f" (link={cmd.link})" \
+                        f"\n\t - Target: {ig.get_name(cmd.body)}" \
 
-def _test__sample_pose_stream(stream_map):
-    stream = stream_map['sample-pose']("celery", "stove")
-    for _ in range(10):
-        sample = next(stream)[0]
-        pos, orn = sample
-        print(f"\nPosition:   \t{tuple(pos)}\nOrientation:   \t{tuple(orn)}")
-
-def _test__test_cfree_pose_pose(stream_map):
-    stream = stream_map['test-cfree-pose-pose']("radish", body2="celery")
-    print(next(stream)[0])
-    
-
-def _test__sample_grasp_stream(ig, stream_map):
-    stream = stream_map['sample-grasp']("celery")
-    for _ in range(10):
-        grasp = next(stream)[0][0]
-        
-        
-
-def _test__ik_stream(ig, stream_map, target):
-    grasp = next(stream_map['sample-grasp'](target))[0][0]
-    print_BodyGrasp(ig, grasp)
-    stream = stream_map['inverse-kinematics'](target, grasp)
-    for _ in range(1):
-        sample = next(stream)[0]
-        if not sample:
-            print(f"IK failed: {sample}")
-            return
-        config, command = sample
-        print(f"\nConfiguration:   \t{[round(q,3) for q in config]}")
-        print(
-            f"\nCommand <{command}>:"
-        )
-        for i,cmd in enumerate(command.body_paths):
-            prefix = f"  {i}) {cmd.__class__.__name__}"
-            if isinstance(cmd,BodyPath):
-                string = f"\n\t - Body: {ig._get_name_from_bodyid(cmd.body)}" \
-                         f"\n\t - {len(cmd.path)} waypoints" \
-                         f"\n\t - {len(cmd.joints)} joints" \
-                         f"\n\t - Attachments: {[ig._get_name_from_bodyid(g.body) for g in cmd.attachments]}"
-            elif isinstance(cmd, Attach):
-                string = f"\n\t - Robot: {ig._get_name_from_bodyid(cmd.robot)}" \
-                         f" (link={cmd.link})" \
-                         f"\n\t - Target: {ig._get_name_from_bodyid(cmd.body)}" \
-
-                
-            print(prefix+string)
-
-
-
-#######################################################
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-g','--gui', action='store_true', help='Simulates the system')
-    args = parser.parse_args()
-
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    config = "fetch_tamp.yaml"
-    config_path = os.path.join(dir_path,config)
-
-    objects = [
-        {'category':'sink',     'position':Point(-0.5,0,0), 'fixed_base':True}, 
-        {'category':'stove',    'position':Point(+0.5,0,0), 'fixed_base':True}, 
-        {'category':'celery',   'position':Point(0,+0.5,0), 'fixed_base':False}, 
-        {'category':'radish',   'position':Point(0,-0.5,0), 'fixed_base':False}
-    ]
-    movable = ['celery', 'radish']
-    
-    iGibson = MyiGibsonSemanticInterface(config_file=config_path, 
-                                         objects=objects,
-                                         headless=(not args.gui)
-                                        )
-
-        
-
-
-    pddlstream_from_problem(ig=iGibson, movable=movable)
-   
-    iGibson.env.close()
-
-    
-
+            
+        print(prefix+string)
 
 if __name__ == '__main__':
     main()

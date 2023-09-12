@@ -49,7 +49,7 @@ from examples.pybullet.utils.pybullet_tools.kuka_primitives import (
     get_grasp_gen,
     get_ik_fn, 
 )
-from examples.pybullet.utils.pybullet_tools.utils import Attachment, get_client, get_joint_positions, get_sample_fn, inverse_kinematics_helper, plan_direct_joint_motion, plan_joint_motion, plan_waypoints_joint_motion, quat_from_euler
+from examples.pybullet.utils.pybullet_tools.utils import Attachment, get_client, get_joint_positions, get_sample_fn, interpolate_poses, inverse_kinematics_helper, plan_direct_joint_motion, plan_joint_motion, plan_waypoints_joint_motion, quat_from_euler
 
 
 # Opt: TypeAlias = Optional[Any]
@@ -847,12 +847,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                     yield BodyPose(body, placement)
         return gen
     
-    def get_kuka_grasp_gen(self):
-        gen = get_grasp_gen(self.robot_id)
-        def wrapper(body:str):
-            body = self.get_id(body)
-            return gen(body)
-        return wrapper
+    
 
     def get_grasp_gen(self):        
         def grasps(body:UniqueID):
@@ -872,39 +867,39 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         return grasps
 
 
-    def get_ik_fn(self, fixed:Optional[List[UniqueID]]=None):
-        robot = self._get_bodyids_from_name(self.robot)[0]
-        obstacles = [self._get_bodyids_from_name(f)[0] for f in fixed] \
-                    if fixed is not None \
-                    else self.get_collidable_body_ids()
-        print('ROBOT    \t\t', robot)
-        print('OBSTACLES\t\t', obstacles)
-        print()
-        _fn = get_ik_fn(robot, obstacles)
-        def fn(body:str, grasp:BodyGrasp):
-            body = self._get_bodyids_from_name(body)[0]
-            pose = BodyPose(body, self.get_pose(body))
-            print('BODY    \t\t',body)
-            print('POSE    \t\t',[f"{self._fmt_num_iter(elem)}  " for elem in pose.pose])
-            x,y,z = grasp.grasp_pose[0]
-            a,b,c,d = grasp.grasp_pose[1]
-            u,v,w = grasp.approach_pose[0]
-            p,q,r,s = grasp.approach_pose[1]
-            grasp_body = self.get_name(grasp.body)
-            grasp_robot = self.get_name(grasp.robot)
-            # R = self._get_object_from_bodyid(grasp.robot)
-            print(
-                f"\nBody Grasp <{grasp}>:"
-                f"\n  - Body:           name: {grasp_body}\tBID: {grasp.body}"
-                f"\n  - Grasp Pose:     Position: ({x:.2f},{y:.2f},{z:.2f})    \tOrientation: ({a:.2f},{b:.2f},{c:.2f},{d:.2f}) "
-                f"\n  - Approach pose:  Position: ({u:.2f},{v:.2f},{w:.2f})    \tOrientation: ({p:.2f},{q:.2f},{r:.2f},{s:.2f}) "
-                f"\n  - Robot:          name: {grasp_robot}\tBID: {grasp.robot}"
-                f"\n  - Link:           {grasp.link}"
-                f"\n  - Index:          {grasp.index}"
-            )
-            print()
-            return _fn(body, pose, grasp)
-        return fn
+    # def get_ik_fn(self, fixed:Optional[List[UniqueID]]=None):
+    #     robot = self._get_bodyids_from_name(self.robot)[0]
+    #     obstacles = [self._get_bodyids_from_name(f)[0] for f in fixed] \
+    #                 if fixed is not None \
+    #                 else self.get_collidable_body_ids()
+    #     print('ROBOT    \t\t', robot)
+    #     print('OBSTACLES\t\t', obstacles)
+    #     print()
+    #     _fn = get_ik_fn(robot, obstacles)
+    #     def fn(body:str, grasp:BodyGrasp):
+    #         body = self._get_bodyids_from_name(body)[0]
+    #         pose = BodyPose(body, self.get_pose(body))
+    #         print('BODY    \t\t',body)
+    #         print('POSE    \t\t',[f"{self._fmt_num_iter(elem)}  " for elem in pose.pose])
+    #         x,y,z = grasp.grasp_pose[0]
+    #         a,b,c,d = grasp.grasp_pose[1]
+    #         u,v,w = grasp.approach_pose[0]
+    #         p,q,r,s = grasp.approach_pose[1]
+    #         grasp_body = self.get_name(grasp.body)
+    #         grasp_robot = self.get_name(grasp.robot)
+    #         # R = self._get_object_from_bodyid(grasp.robot)
+    #         print(
+    #             f"\nBody Grasp <{grasp}>:"
+    #             f"\n  - Body:           name: {grasp_body}\tBID: {grasp.body}"
+    #             f"\n  - Grasp Pose:     Position: ({x:.2f},{y:.2f},{z:.2f})    \tOrientation: ({a:.2f},{b:.2f},{c:.2f},{d:.2f}) "
+    #             f"\n  - Approach pose:  Position: ({u:.2f},{v:.2f},{w:.2f})    \tOrientation: ({p:.2f},{q:.2f},{r:.2f},{s:.2f}) "
+    #             f"\n  - Robot:          name: {grasp_robot}\tBID: {grasp.robot}"
+    #             f"\n  - Link:           {grasp.link}"
+    #             f"\n  - Index:          {grasp.index}"
+    #         )
+    #         print()
+    #         return _fn(body, pose, grasp)
+    #     return fn
 
 
     def get_grasp_traj_fn(self, num_attempts:int=10) -> Callable[[str,BodyGrasp],Tuple[JointPos,Command]]:
@@ -1018,7 +1013,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 assert (q.body == robot_id)
 
         ft.wraps(qfree_traj)
-        def wrapper(q1:KinematicConstraint, q2:KinematicConstraint, atpose_fluents:List[Tuple]=[]):
+        def wrapper(q1:KinematicConstraint, q2:KinematicConstraint, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
             _consistency_check(q1)
             _consistency_check(q2)
             q1 = self._as_arm_config(q1)
@@ -1042,6 +1037,51 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
     def get_cfree_pose_pose_test(self):
         return self.test_cfree_pose
+    
+    def get_cfree_obj_approach_pose_test(self):
+        def collision_test(b1:UniqueID, p1:Pose, g1:BodyGrasp, b2:UniqueID, p2:Pose) -> bool:
+            '''Determine if, when performing grasp g1 on target object b1 with pose p1,
+            retracting back from grasp.grasp_pose to grasp.approach_pose will cause b1
+            to collide with obstacle object b2 with pose p2.
+            '''
+            if (b1 == b2): 
+                return False
+            with UndoableContext(self._robot):
+                self.set_pose(b2, p2)
+                for obj_pose in interpolate_poses(g1.grasp_pose, g1.approach_pose):
+                    collision_free = self.test_cfree_pose(b1,obj_pose,b2,p2)
+                    if not collision_free:
+                        return True
+                    # self.set_pose(b1, obj_pose)
+                    # if pairwise_collision(b1, b2):
+                    #     return True
+                return False
+        
+        def _preprocess_inputs(b1:UniqueID, p1:Union[Pose,BodyPose], g1:BodyGrasp, b2:UniqueID, p2:Union[Pose,BodyPose]) -> None:
+            if not isinstance(b1, int): 
+                b1 = self.get_id(b1)
+            if not isinstance(b2, int): 
+                b2 = self.get_id(b2)
+
+            if isinstance(p1, BodyPose):
+                assert p1.body == b1
+                p1 = p1.pose
+            if isinstance(p2, BodyPose):
+                assert p2.body == b2
+                p2 = p2.pose
+
+            assert g1.body == b1
+            
+            return b1,p1,g1,b2,p2
+
+        ft.wraps(collision_test)
+        def valid_approach_test(b1:UniqueID, p1:Union[Pose,BodyPose], g1:BodyGrasp, b2:UniqueID, p2:Union[Pose,BodyPose]) -> bool:
+            b1,p1,g1,b2,p2 = _preprocess_inputs(b1,p1,g1,b2,p2) 
+            collision = collision_test(b1,p1,g1,b2,p2) 
+
+            return not collision
+       
+        return valid_approach_test
 
     ################################################################################
 

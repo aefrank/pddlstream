@@ -4,7 +4,7 @@ import argparse
 from itertools import filterfalse, tee
 import os
 import sys
-from typing import Iterable, List, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 # import igibson
 # from igibson import object_states
 # from igibson.envs.igibson_env import iGibsonEnv
@@ -18,8 +18,8 @@ from typing import Iterable, List, Tuple, Union
 # from igibson.utils.utils import parse_config
 
 from examples.fetch.from_kuka_tamp.fetch_primitives import MyiGibsonSemanticInterface
-from examples.pybullet.utils.pybullet_tools.utils import Point, Pose, stable_z
-from examples.pybullet.utils.pybullet_tools.kuka_primitives import Attach, BodyPath, get_ik_fn
+from examples.pybullet.utils.pybullet_tools.utils import Point, Pose, get_sample_fn, stable_z
+from examples.pybullet.utils.pybullet_tools.kuka_primitives import Attach, BodyPath, Command, get_ik_fn
 from pddlstream.language.generator import from_fn, from_gen_fn, from_test
 
 from pddlstream.utils import read
@@ -87,24 +87,56 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
         # 'plan-holding-motion': from_fn(get_holding_motion_gen(robot, fixed, teleport)),
 
         'test-cfree-pose-pose': from_test(ig.get_cfree_pose_pose_test()),
-        'test-cfree-approach-pose': from_test(ig.get_cfree_obj_approach_pose_test()),
-        # 'test-cfree-traj-pose': from_test(negate_test(get_movable_collision_test())), #get_cfree_traj_pose_test()),
+        'test-cfree-approach-pose': from_test(ig.get_cfree_approach_obj_pose_test()),
+        'test-cfree-traj-pose': from_test(ig.get_cfree_command_obj_pose_test())
 
         # 'TrajCollision': get_movable_collision_test(),
     }
 
     target = "celery"
 
-    # _test__sample_pose_stream(stream_map)
-    # _test__test_cfree_pose_pose(stream_map)
-    # _test__sample_grasp_stream(ig, stream_map)
+    # _test__sample_pose_stream(stream_map, target, surface="stove")
+    # _test__test_cfree_pose_pose(stream_map, target, b2="radish")
+    # _test__sample_grasp_stream(ig, stream_map, target)
     # _test__ik_stream(ig, stream_map, target)
-    # _test__plan_free_motion_stream(ig, init, stream_map)
-    _test__test_cfree_approach_pose(ig, stream_map)
+    # _test__plan_free_motion_stream(ig, stream_map, init, target)
+    # _test__test_cfree_approach_pose(ig, stream_map, target)
+    _test__test_cfree_traj_pose(ig, stream_map, obstacle=target)
 
 
-def _test__test_cfree_approach_pose(ig:MyiGibsonSemanticInterface, stream_map:dict):
-    b1 = "celery"
+def _test__test_cfree_traj_pose(ig:MyiGibsonSemanticInterface, stream_map:dict, obstacle:str,
+                                start_pose:Optional[Pose]=None, end_pose:Optional[Pose]=None):
+    def get_command():
+        q1 = ig.arm_ik(start_pose) if start_pose is not None else ig.get_arm_config()
+        q2 = ig.arm_ik(end_pose)   if end_pose   is not None else (qrand:=get_sample_fn(ig.robot_id, ig._arm_joint_ids))()
+        
+        command_stream = stream_map['plan-free-motion'](q1,q2)
+        command = next(command_stream)[0]
+        if len(command) < 1:
+            if end_pose is not None:
+                raise RuntimeError("f'plan-free-motion' stream could not find a path for start and end poses {start_pose} and{end_pose}")
+            else:
+                for _ in range(1000):
+                    q2 = qrand()
+                    command_stream = stream_map['plan-free-motion'](q1,q2)
+                    command = next(command_stream)[0]
+                    if len(command) >= 1:
+                        break
+        command = command[0]
+        return command
+    
+    command = get_command()
+    assert isinstance(command,Command), f"command '{command}' is not of type Command"
+    print_Command(ig, command)
+
+    obstacle_pose = ig.get_pose(obstacle)
+    test_stream = stream_map['test-cfree-traj-pose'](command, obstacle, obstacle_pose)
+    result = next(test_stream)
+    print(result)
+    print_bool(result)
+
+def _test__test_cfree_approach_pose(ig:MyiGibsonSemanticInterface, stream_map:dict, target:str):
+    b1 = target
     p1 = ig.get_pose(b1)
 
     grasp_stream = stream_map['sample-grasp'](b1)
@@ -118,10 +150,10 @@ def _test__test_cfree_approach_pose(ig:MyiGibsonSemanticInterface, stream_map:di
         result = next(stream)
         print_bool(result)
 
-def _test__plan_free_motion_stream(ig:MyiGibsonSemanticInterface, state, stream_map:dict):
+def _test__plan_free_motion_stream(ig:MyiGibsonSemanticInterface, stream_map:dict, state:List, target:str):
     atpose_fluents = [fluent for fluent in state if fluent[0].lower()=='atpose']
     print("AtPose Fluents: ", [(name, obj, tuple(ig._fmt_num_iter(p) for p in pose)) for name,obj,pose in atpose_fluents])
-    grasp = next(stream_map['sample-grasp']("celery"))[0][0]
+    grasp = next(stream_map['sample-grasp'](target))[0][0]
 
     q1 = ig.get_arm_config()
     p1 = ig.get_pose(ig.eef_id)
@@ -144,25 +176,20 @@ def _test__plan_free_motion_stream(ig:MyiGibsonSemanticInterface, state, stream_
     stream = stream_map['plan-free-motion'](q2, q3, atpose_fluents=atpose_fluents)
     command = next(stream)[0][0]
     print_Command(ig, command)
-    
-    
-    
-    
-    
 
-def _test__sample_pose_stream(stream_map):
-    stream = stream_map['sample-pose']("celery", "stove")
+def _test__sample_pose_stream(stream_map:dict, target:str, surface:str):
+    stream = stream_map['sample-pose'](target, surface)
     for _ in range(10):
         sample = next(stream)[0]
         pos, orn = sample.pose
         print(f"\nPosition:   \t{tuple(pos)}\nOrientation:   \t{tuple(orn)}")
 
-def _test__test_cfree_pose_pose(stream_map):
-    stream = stream_map['test-cfree-pose-pose']("radish", body2="celery")
+def _test__test_cfree_pose_pose(stream_map:dict, b1:str, b2:str):
+    stream = stream_map['test-cfree-pose-pose'](b1, body2=b2)
     print_bool(next(stream)[0])
     
-def _test__sample_grasp_stream(ig, stream_map):
-    stream = stream_map['sample-grasp']("celery")
+def _test__sample_grasp_stream(ig:MyiGibsonSemanticInterface, stream_map:dict, target:str):
+    stream = stream_map['sample-grasp'](target)
     for _ in range(10):
         grasp = next(stream)[0][0]
         print_BodyGrasp(ig, grasp)
@@ -274,11 +301,13 @@ def _temp_test(ig, target):
     # return PDDLProblem(domain_pddl, constant_map, stream_pddl, stream_map, init, goal)
 
 
-def print_bool(boolean:Union[bool,Iterable[bool]]) -> None:
-    try:
-        print(f"Result: \t{[b==tuple() for b in boolean]}")
-    except Exception:
-        print(f"Result: \t{boolean==tuple()}")
+def print_bool(result:Union[bool,Iterable[bool]]) -> None:
+    if result==[()]:
+        print(f"Result: \tTrue")
+    elif result==[]:
+        print(f"Result: \tFalse")
+    else:
+        raise ValueError(f"Unexpected 'stream boolean' {result} of type {type(result)}. Expected [()]=True or []=False.")
 
 
 def print_Conf(ig, conf):

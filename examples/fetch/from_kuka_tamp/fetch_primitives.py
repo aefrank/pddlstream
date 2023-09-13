@@ -1004,7 +1004,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                     command = Command([BodyPath(robot_id, path, joints=joint_ids)]) if path is not None else None
                     return (command,)
                 else:
-                    return None
+                    return tuple()
 
         def _consistency_check(q:KinematicConstraint) -> None:
             if isinstance(q,BodyConf):
@@ -1025,11 +1025,11 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
 
 
-    def get_holding_motion_gen(self, robot, fixed=[], teleport=False, self_collisions=True):
-        pass
+    # def get_holding_motion_gen(self, robot, fixed=[], teleport=False, self_collisions=True):
+    #     pass
 
-    def get_movable_collision_test(self):
-        pass
+    # def get_movable_collision_test(self):
+    #     pass
 
     # def get_joint_states(self, body: UniqueID):
         # only using joint position, not velocity
@@ -1038,7 +1038,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     def get_cfree_pose_pose_test(self):
         return self.test_cfree_pose
     
-    def get_cfree_obj_approach_pose_test(self):
+    def get_cfree_approach_obj_pose_test(self):
         def collision_test(b1:UniqueID, p1:Pose, g1:BodyGrasp, b2:UniqueID, p2:Pose) -> bool:
             '''Determine if, when performing grasp g1 on target object b1 with pose p1,
             retracting back from grasp.grasp_pose to grasp.approach_pose will cause b1
@@ -1057,38 +1057,79 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                     #     return True
                 return False
         
-        def _preprocess_inputs(b1:UniqueID, p1:Union[Pose,BodyPose], g1:BodyGrasp, b2:UniqueID, p2:Union[Pose,BodyPose]) -> None:
+        def _preprocess_inputs(b1:UniqueID, p1:Union[Pose,BodyPose], g1:BodyGrasp, 
+                               b2:UniqueID, p2:Union[Pose,BodyPose]
+                            ) -> Tuple[int,Pose,BodyGrasp,int,Pose]:
             if not isinstance(b1, int): 
                 b1 = self.get_id(b1)
             if not isinstance(b2, int): 
                 b2 = self.get_id(b2)
-
             if isinstance(p1, BodyPose):
                 assert p1.body == b1
                 p1 = p1.pose
             if isinstance(p2, BodyPose):
                 assert p2.body == b2
                 p2 = p2.pose
-
             assert g1.body == b1
-            
             return b1,p1,g1,b2,p2
 
-        ft.wraps(collision_test)
-        def valid_approach_test(b1:UniqueID, p1:Union[Pose,BodyPose], g1:BodyGrasp, b2:UniqueID, p2:Union[Pose,BodyPose]) -> bool:
+        def collision_free_grasp_retrieval_test(b1:UniqueID, p1:Union[Pose,BodyPose], g1:BodyGrasp, 
+                                                b2:UniqueID, p2:Union[Pose,BodyPose]) -> bool:
+            '''Returns true if straight line trajectory of body b1 located initially at pose p1 caused by the 
+            retrieval motion from g1.grasp_pose to g1.approach_pose is COLLISION-FREE w.r.t. the single obstacle 
+            b2 located at pose p2.
+            '''
             b1,p1,g1,b2,p2 = _preprocess_inputs(b1,p1,g1,b2,p2) 
             collision = collision_test(b1,p1,g1,b2,p2) 
-
             return not collision
        
-        return valid_approach_test
+        return collision_free_grasp_retrieval_test
+
+    def get_cfree_command_obj_pose_test(self):
+        def collision_test(command:Command, body:int, pose:Pose) -> bool:
+            '''Determine if the motions encoded by 'command' cause a collision with
+            obstacle 'body' located at 'pose'.
+            '''
+            def _path_collision_test(path:BodyPath) -> bool:
+                '''Determine if the moving bodies of 'path' collide with 'body' located at 'pose'.
+                '''
+                moving = path.bodies()
+                if body in moving:
+                    # Assume that moving bodies are not considered obstacles and cannot cause collisions
+                    return False
+                with UndoableContext(self._robot):
+                    for _ in path.iterator():
+                        if any(pairwise_collision(mov,body) for mov in moving):
+                            return True
+                    return False
+            
+            collision = any(_path_collision_test(path) for path in command.body_paths)
+            return collision
+
+        
+
+        def _preprocess_inputs(command:Command, body:UniqueID, pose:Union[Pose,BodyPose]) -> Tuple[Command,int,Pose]:
+            if not isinstance(body,int): body = self.get_id(body)
+            if isinstance(pose,BodyPose):
+                assert pose.body == body
+                pose = pose.pose
+            return command, body, pose
+        
+        def no_collision_command_body_test(command:Command, body:UniqueID, pose:Union[Pose,BodyPose]) -> bool:
+            '''Returns true if the moving bodies of 'command' DO NOT COLLIDE with 'body' located at pose 'pose'.
+            '''
+            command, body, pose = _preprocess_inputs(command, body, pose)
+            cfree = not collision_test(command, body, pose)
+            return cfree
+        
+        return no_collision_command_body_test
 
     ################################################################################
 
     
 
 
-
+# TODO: put this in objspec file
 def _as_urdf_spec(spec:Union[str,dict]) -> "URDFObjectSpec":
     # def _obj_attr_check(spec:dict) -> None:
     #     '''Ensure all necessary keys present in object dict, and no forbidden keys are present.

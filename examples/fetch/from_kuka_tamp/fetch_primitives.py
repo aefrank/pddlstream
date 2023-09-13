@@ -1085,7 +1085,9 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
        
         return collision_free_grasp_retrieval_test
 
-    def get_cfree_command_obj_pose_test(self):
+    
+    
+    def get_command_obj_pose_collision_test(self):
         def collision_test(command:Command, body:int, pose:Pose) -> bool:
             '''Determine if the motions encoded by 'command' cause a collision with
             obstacle 'body' located at 'pose'.
@@ -1105,9 +1107,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             
             collision = any(_path_collision_test(path) for path in command.body_paths)
             return collision
-
         
-
         def _preprocess_inputs(command:Command, body:UniqueID, pose:Union[Pose,BodyPose]) -> Tuple[Command,int,Pose]:
             if not isinstance(body,int): body = self.get_id(body)
             if isinstance(pose,BodyPose):
@@ -1115,14 +1115,14 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 pose = pose.pose
             return command, body, pose
         
-        def no_collision_command_body_test(command:Command, body:UniqueID, pose:Union[Pose,BodyPose]) -> bool:
+        def test(command:Command, body:UniqueID, pose:Union[Pose,BodyPose]) -> bool:
             '''Returns true if the moving bodies of 'command' DO NOT COLLIDE with 'body' located at pose 'pose'.
             '''
             command, body, pose = _preprocess_inputs(command, body, pose)
-            cfree = not collision_test(command, body, pose)
-            return cfree
+            collision = collision_test(command, body, pose)
+            return collision
         
-        return no_collision_command_body_test
+        return test
 
     ################################################################################
 

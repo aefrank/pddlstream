@@ -22,7 +22,7 @@ from examples.pybullet.utils.pybullet_tools.utils import Point, Pose, get_sample
 from examples.pybullet.utils.pybullet_tools.kuka_primitives import Attach, BodyPath, Command, get_ik_fn
 from pddlstream.language.generator import from_fn, from_gen_fn, from_test
 
-from pddlstream.utils import read
+from pddlstream.utils import negate_test, read
 
 #######################################################
 
@@ -88,9 +88,9 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
 
         'test-cfree-pose-pose': from_test(ig.get_cfree_pose_pose_test()),
         'test-cfree-approach-pose': from_test(ig.get_cfree_approach_obj_pose_test()),
-        'test-cfree-traj-pose': from_test(ig.get_cfree_command_obj_pose_test())
+        'test-cfree-traj-pose': from_test(negate_test(ig.get_command_obj_pose_collision_test())),
 
-        # 'TrajCollision': get_movable_collision_test(),
+        'TrajCollision': ig.get_command_obj_pose_collision_test()
     }
 
     target = "celery"

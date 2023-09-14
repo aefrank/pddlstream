@@ -39,6 +39,7 @@ from examples.fetch.from_kuka_tamp.object_spec import (
     Position,
     UniqueID, 
 )
+from examples.pybullet.utils.motion.motion_planners.rrt_connect import birrt
 from examples.pybullet.utils.pybullet_tools.kuka_primitives import (
     Attach,
     BodyConf,
@@ -49,7 +50,24 @@ from examples.pybullet.utils.pybullet_tools.kuka_primitives import (
     get_grasp_gen,
     get_ik_fn, 
 )
-from examples.pybullet.utils.pybullet_tools.utils import Attachment, get_client, get_joint_positions, get_sample_fn, interpolate_poses, inverse_kinematics_helper, plan_direct_joint_motion, plan_joint_motion, plan_waypoints_joint_motion, quat_from_euler
+from examples.pybullet.utils.pybullet_tools.utils import MAX_DISTANCE, Attachment, check_initial_end, get_client, get_distance_fn, get_extend_fn, get_joint_positions, get_sample_fn, interpolate_poses, inverse_kinematics_helper, plan_direct_joint_motion, plan_joint_motion, plan_waypoints_joint_motion, quat_from_euler
+
+# Pybullet Planning implementation: original by Caelan Reed Garrett vs. iGibson version 
+PlanningUtilsVersion = Enum('PBToolsImpl', ['PDDLSTREAM', 'IGIBSON'])
+import examples.pybullet.utils.pybullet_tools as pbtools_ps
+import igibson.external.pybullet_tools as pbtools_ig
+
+import examples.pybullet.utils.motion.motion_planners as motion_ps
+import igibson.external.motion.motion_planners as motion_ig
+PYBULLET_TOOLS_MODULES = {
+    PlanningUtilsVersion.PDDLSTREAM : pbtools_ps,
+    PlanningUtilsVersion.IGIBSON : pbtools_ig
+}
+MOTION_PLANNING_MODULES = {
+    PlanningUtilsVersion.PDDLSTREAM : motion_ps,
+    PlanningUtilsVersion.IGIBSON : motion_ig
+}
+
 
 
 # Opt: TypeAlias = Optional[Any]
@@ -107,6 +125,10 @@ def nonstring_iterable(v:Any) -> Iterator:
     if is_nonstring_iterable(v): return iter(v)
     elif isinstance(v,str): return iter([v])
     else: return iter(v)
+
+
+
+
 
 
 
@@ -590,16 +612,19 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     
     def get_robot_arm_collision_params(self,
                                 *,
+                                obstacles:List[int]=[],
+                                ignore_other_scene_obstacles:bool=False,
                                 self_collisions:bool=True, 
                                 disabled_collisions:Set[Tuple[int,int]]={},
-                                allow_collision_links:List[int]=[], 
+                                allow_collision_links:List[int]=[],
     ) -> Tuple[BaseRobot, int,List[int],List[int],Set[Tuple[int,int]],List[Tuple[int,int]],List[int],List[float],List[float]]:
         '''Assuming one Fetch robot so we can use MotionPlanningWrapper functionality
         '''
         robot     = self._motion_planner.robot
         robot_id  = self._motion_planner.robot_id
         joint_ids = self._motion_planner.arm_joint_ids
-        obstacles = self._motion_planner.mp_obstacles
+        if not ignore_other_scene_obstacles:
+            obstacles = list(set(obstacles) | set(self._motion_planner.mp_obstacles))
 
         disabled_collisions |= robot.disabled_collision_pairs
         if robot.model_name == "Fetch":
@@ -610,6 +635,11 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "forearm_roll_link")),
                 (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "elbow_flex_link")),
             }
+            allow_collision_links = list(
+                set(allow_collision_links) | 
+                set(self.eef_id) | 
+                set([finger.link_id for finger in self._robot.finger_links[self._robot.default_arm]])
+            )
 
         
         # Pair of links within the robot that need to be checked for self-collisions
@@ -834,6 +864,138 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
         return hand_collision_fn
     
+
+
+    
+    
+    def plan_arm_joint_motion_pddlstream_style(self, 
+        q1:JointPos, 
+        q2:JointPos, 
+        obstacles:List[int],
+        attachments:List[Attachment]=[],
+        weights:Optional[Iterable[float]]=None, 
+        resolutions:Optional[Iterable[float]]=None, 
+        algorithm:str='birrt',
+        ignore_other_scene_obstacles=False,
+        *, 
+        planning_utils_version:PlanningUtilsVersion=PlanningUtilsVersion.PDDLSTREAM, 
+        use_aabb:bool=False, 
+        cache:bool=True, 
+         **kwargs
+    ):
+        '''My attempt to reconcile plan_joint_motion between the implementations used by pddlstream and iGibson.
+        '''
+        
+        assert len(self._arm_joint_ids) == len(q1) and len(self._arm_joint_ids) == len(q2)
+
+        pbtools_module = PYBULLET_TOOLS_MODULES[planning_utils_version]
+        distance_fn, sample_fn, extend_fn, collision_fn = self._get_arm_joint_motion_helper_fns(
+            pbtools_module=pbtools_module, 
+            obstacles=obstacles,
+            ignore_other_scene_obstacles=ignore_other_scene_obstacles,
+            attachments=attachments,
+            weights=weights,
+            resolutions=resolutions,
+            use_aabb=use_aabb, 
+            cache=cache,
+        )
+        
+        with UndoableContext(self._robot):
+            if not check_initial_end(q1, q2, collision_fn):
+                return None
+            
+            motion_module = MOTION_PLANNING_MODULES[planning_utils_version]
+            mp_algo_fn = self._get_motion_planning_algorithm(motion_module, algorithm)
+            if algorithm == 'direct':
+                return mp_algo_fn(q1, q2, extend_fn, collision_fn)
+            elif algorithm == 'birrt':
+                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, **kwargs)
+            elif algorithm == 'rrt_star':
+                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, max_iterations=5000, **kwargs)
+            elif algorithm == 'rrt':
+                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, iterations=500, **kwargs)
+            elif algorithm == 'lazy_prm':
+                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, [500, 2000, 5000], **kwargs)
+            else:
+                return None
+    
+    def _get_motion_planning_algorithm(self, motion_module, algorithm):
+        if algorithm == 'direct':
+            return motion_module.direct_path
+        elif algorithm == 'birrt':
+            return motion_module.birrt 
+        elif algorithm == 'rrt_star':
+            return motion_module.rrt_star 
+        elif algorithm == 'rrt':
+            return motion_module.rrt 
+        elif algorithm == 'lazy_prm':
+            return motion_module.lazy_prm_replan_loop 
+        else:
+            raise ValueError(f"Inappropriate argument algorithm={algorithm}. Expected one of: 'direct', 'birrt', 'rrt_star', 'rrt', or 'lazy_prm'")
+
+
+    def _get_arm_joint_motion_helper_fns(self, 
+        pbtools_module,
+        obstacles=[],
+        attachments=[], 
+        self_collisions=True, 
+        disabled_collisions=set(),
+        weights=None, 
+        resolutions=None,
+        ignore_other_scene_obstacles=False,
+        *, 
+        use_aabb=False, 
+        cache=True, # original pybullet_tools version only
+        allow_collision_links=[], # iGibson pybullet_tools version only
+    ):
+        ( 
+            _,
+            robot_id, 
+            joint_ids, 
+            obstacles, 
+            disabled_collisions, 
+            self_collisions, 
+            _, 
+            _, 
+            _ 
+        ) \
+        = self.get_robot_arm_collision_params(
+            self_collisions=self_collisions, 
+            disabled_collisions=disabled_collisions,
+            ignore_other_scene_obstacles=ignore_other_scene_obstacles
+        )
+
+        if pbtools_module==PYBULLET_TOOLS_MODULES[PlanningUtilsVersion.PDDLSTREAM]:
+            if (weights is None) and (resolutions is not None):
+                weights = np.reciprocal(resolutions)
+            distance_fn = pbtools_module.get_distance_fn(robot_id, joint_ids, weights=weights)
+            sample_fn = pbtools_module.get_sample_fn(robot_id, joint_ids)
+            extend_fn = pbtools_module.get_extend_fn(robot_id, joint_ids, resolutions=resolutions)
+            collision_fn = pbtools_module.get_collision_fn(
+                body=robot_id, joints=joint_ids, obstacles=obstacles, attachments=attachments, 
+                self_collisions=self_collisions, disabled_collisions=disabled_collisions,
+                use_aabb=use_aabb, cache=cache
+            )
+        elif pbtools_module==PYBULLET_TOOLS_MODULES[PlanningUtilsVersion.IGIBSON]:
+            distance_fn = pbtools_module.get_distance_fn(robot_id, joint_ids, weights=weights)
+            sample_fn = pbtools_module.get_sample_fn(robot_id, joint_ids)
+            extend_fn = pbtools_module.get_extend_fn(robot_id, joint_ids, resolutions=resolutions)
+            collision_fn = pbtools_module.get_collision_fn(
+                body=robot_id, joints=joint_ids, obstacles=obstacles, attachments=attachments, 
+                self_collisions=self_collisions, disabled_collisions=disabled_collisions,
+                allow_collision_links=allow_collision_links
+            )
+        else:
+            raise ValueError(
+                f"Inappropriate argument pbtools_module={pbtools_module} of type {type(pbtools_module)}. Expected either " 
+                f"{PYBULLET_TOOLS_MODULES[PlanningUtilsVersion.PDDLSTREAM]} or {PYBULLET_TOOLS_MODULES[PlanningUtilsVersion.IGIBSON]}"
+            )
+        return distance_fn, sample_fn, extend_fn, collision_fn
+
+
+    
+    
+
     ################################################################################
     
     def get_stable_gen(self): # -> Generator[Pose, None, None]:
@@ -985,8 +1147,8 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
 
     def get_free_motion_gen(self):
-        robot = self._motion_planner.robot
-        robot_id = self._motion_planner.robot_id
+        robot = self._robot
+        robot_id = self.robot_id
         joint_ids = self._arm_joint_ids
         def qfree_traj(q1:JointPos, q2:JointPos, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
             with UndoableContext(robot):
@@ -1021,7 +1183,44 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             return qfree_traj(q1, q2, atpose_fluents=atpose_fluents)
         return wrapper
 
-                
+
+    def get_motion_gen(self):
+        robot = self._motion_planner.robot
+        robot_id = self._motion_planner.robot_id
+        joint_ids = self._arm_joint_ids
+        def qfree_traj(q1:JointPos, q2:JointPos, grasp:BodyGrasp=None, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
+            with UndoableContext(robot):
+                # q1.assign()
+                self.set_arm_config(q1)
+                self._get_robot_arm_collision_fn()
+                # Temporarily use only specified obstacles for motion planner
+                original_mp_obstacles = self._motion_planner.mp_obstacles
+                self._motion_planner.mp_obstacles = set(self.get_collidable_body_ids()) | self.assign_poses(atpose_fluents)
+                # Calculate arm trajectory
+                path = self._motion_planner.plan_arm_motion(q2)
+                # Reassign old mp_obstacles to original value
+                self._motion_planner.mp_obstacles = original_mp_obstacles
+                # Return value
+                if path is not None:
+                    command = Command([BodyPath(robot_id, path, joints=joint_ids)]) if path is not None else None
+                    return (command,)
+                else:
+                    return tuple()
+
+        def _consistency_check(q:KinematicConstraint) -> None:
+            if isinstance(q,BodyConf):
+                assert (q.body == robot_id) and (q.joints == joint_ids)
+            elif isinstance(q, BodyPose):
+                assert (q.body == robot_id)
+
+        ft.wraps(qfree_traj)
+        def wrapper(q1:KinematicConstraint, q2:KinematicConstraint, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
+            _consistency_check(q1)
+            _consistency_check(q2)
+            q1 = self._as_arm_config(q1)
+            q2 = self._as_arm_config(q2)
+            return qfree_traj(q1, q2, atpose_fluents=atpose_fluents)
+        return wrapper 
 
 
 

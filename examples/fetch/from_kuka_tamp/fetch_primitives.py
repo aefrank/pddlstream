@@ -14,7 +14,18 @@ import numpy as np
 from igibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
 from igibson.action_primitives.starter_semantic_action_primitives import GRASP_APPROACH_DISTANCE, MAX_ATTEMPTS_FOR_SAMPLING_POSE_WITH_OBJECT_AND_PREDICATE, PREDICATE_SAMPLING_Z_OFFSET, UndoableContext
 from igibson import object_states
-from igibson.external.pybullet_tools.utils import all_between, create_attachment, get_aabb, get_collision_fn, get_custom_limits, get_moving_links, get_self_link_pairs, is_collision_free, link_from_name, pairwise_collision, pairwise_link_collision, set_joint_positions
+from igibson.external.pybullet_tools.utils import (
+    all_between, 
+    get_aabb, 
+    get_custom_limits, 
+    get_moving_links, 
+    get_self_link_pairs, 
+    is_collision_free, 
+    link_from_name, 
+    pairwise_collision, 
+    pairwise_link_collision, 
+    set_joint_positions
+)
 from igibson.object_states.utils import sample_kinematics
 from igibson.objects.object_base import BaseObject
 from igibson.envs.igibson_env import iGibsonEnv
@@ -39,7 +50,6 @@ from examples.fetch.from_kuka_tamp.object_spec import (
     Position,
     UniqueID, 
 )
-from examples.pybullet.utils.motion.motion_planners.rrt_connect import birrt
 from examples.pybullet.utils.pybullet_tools.kuka_primitives import (
     Attach,
     BodyConf,
@@ -47,15 +57,13 @@ from examples.pybullet.utils.pybullet_tools.kuka_primitives import (
     BodyPath, 
     BodyPose,
     Command,
-    get_grasp_gen,
-    get_ik_fn, 
 )
 from examples.pybullet.utils.pybullet_tools.utils import MAX_DISTANCE, Attachment, check_initial_end, get_client, get_distance_fn, get_extend_fn, get_joint_positions, get_sample_fn, interpolate_poses, inverse_kinematics_helper, plan_direct_joint_motion, plan_joint_motion, plan_waypoints_joint_motion, quat_from_euler
 
 # Pybullet Planning implementation: original by Caelan Reed Garrett vs. iGibson version 
 PlanningUtilsVersion = Enum('PBToolsImpl', ['PDDLSTREAM', 'IGIBSON'])
-import examples.pybullet.utils.pybullet_tools as pbtools_ps
-import igibson.external.pybullet_tools as pbtools_ig
+import examples.pybullet.utils.pybullet_tools.utils as pbtools_ps
+import igibson.external.pybullet_tools.utils as pbtools_ig
 
 import examples.pybullet.utils.motion.motion_planners as motion_ps
 import igibson.external.motion.motion_planners as motion_ig
@@ -615,31 +623,34 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                                 obstacles:List[int]=[],
                                 ignore_other_scene_obstacles:bool=False,
                                 self_collisions:bool=True, 
-                                disabled_collisions:Set[Tuple[int,int]]={},
+                                disabled_collisions:Set[Tuple[int,int]]=set(),
                                 allow_collision_links:List[int]=[],
     ) -> Tuple[BaseRobot, int,List[int],List[int],Set[Tuple[int,int]],List[Tuple[int,int]],List[int],List[float],List[float]]:
         '''Assuming one Fetch robot so we can use MotionPlanningWrapper functionality
         '''
-        robot     = self._motion_planner.robot
-        robot_id  = self._motion_planner.robot_id
-        joint_ids = self._motion_planner.arm_joint_ids
+        robot     = self._robot
+        robot_id  = self.robot_id
+        joint_ids = self._arm_joint_ids
         if not ignore_other_scene_obstacles:
             obstacles = list(set(obstacles) | set(self._motion_planner.mp_obstacles))
 
-        disabled_collisions |= robot.disabled_collision_pairs
+        disabled_collisions = robot.disabled_collision_pairs + [collision for collision in disabled_collisions if collision not in robot.disabled_collision_pairs]
         if robot.model_name == "Fetch":
-            disabled_collisions |= {
+            # iGibson motion_planning_wrapper processing for Fetch
+            fetch_disabled_collisions = [
                 (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "torso_fixed_link")),
                 (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "shoulder_lift_link")),
                 (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "upperarm_roll_link")),
                 (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "forearm_roll_link")),
                 (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "elbow_flex_link")),
-            }
-            allow_collision_links = list(
-                set(allow_collision_links) | 
-                set(self.eef_id) | 
-                set([finger.link_id for finger in self._robot.finger_links[self._robot.default_arm]])
-            )
+            ]
+            disabled_collisions += [collision for collision in fetch_disabled_collisions if collision not in disabled_collisions]
+            
+            allow_collision_links = set(allow_collision_links)
+            allow_collision_links.add(self.eef_id)
+            finger_links = set([finger.link_id for finger in robot.finger_links[robot.default_arm]])
+            allow_collision_links |= finger_links
+            allow_collision_links = list(allow_collision_links)
 
         
         # Pair of links within the robot that need to be checked for self-collisions
@@ -656,9 +667,21 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     
     
     
-    
+    def arm_fk(self, q:JointPos):
+        '''Arm Forward Kinematics: Calculate Fetch gripper pose given arm joint positions.
+        '''
+        with UndoableContext(self._robot):
+            # ignored return vals in order are: 
+            #   localInertialFramePosition: Position3D, localInertialFrameOrientation: Quaternion,
+            #   worldLinkFramePosition: Position3D, worldLinkFrameOrientation: Quaternion
+            # In addition, if pybullet.getLinkState is called with computeLinkVelocity=1, there will be two additional return values:
+            #   worldLinkLinearVelocity:Tuple[float,float,float], worldLinkAngularVelocity:Tuple[float,float,float]
+            self.set_arm_config(q)
+            pos, orn, _, _, _, _ = pb.getLinkState(self.robot_id, self.eef_id, computeForwardKinematics=True, physicsClientId=get_client())
+            return (pos, orn)
+
     def arm_ik(self, eef_position:Position, eef_orientation:Optional[Orientation]=None, use_nullspace:bool=True, **kwargs) -> Optional[JointPos]:
-        '''Calculate Fetch arm joint configuration that satisfies the given end-effector position in the workspace (ignoring collisions). 
+        '''Arm Inverse Kinematics: Calculate Fetch arm joint configuration that satisfies the given end-effector position in the workspace (ignoring collisions). 
         Can additionally specify a target end-effector orientation and/or joint configuration nullspace.
         '''
         # with UndoableContext(self._robot):   
@@ -868,7 +891,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
     
     
-    def plan_arm_joint_motion_pddlstream_style(self, 
+    def plan_arm_joint_motion(self, 
         q1:JointPos, 
         q2:JointPos, 
         obstacles:List[int],
@@ -876,9 +899,9 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         weights:Optional[Iterable[float]]=None, 
         resolutions:Optional[Iterable[float]]=None, 
         algorithm:str='birrt',
-        ignore_other_scene_obstacles=False,
+        ignore_other_scene_obstacles=True,
         *, 
-        planning_utils_version:PlanningUtilsVersion=PlanningUtilsVersion.PDDLSTREAM, 
+        planning_utils_version:PlanningUtilsVersion=PlanningUtilsVersion.IGIBSON, 
         use_aabb:bool=False, 
         cache:bool=True, 
          **kwargs
@@ -901,7 +924,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         )
         
         with UndoableContext(self._robot):
-            if not check_initial_end(q1, q2, collision_fn):
+            if not pbtools_module.check_initial_end(q1, q2, collision_fn):
                 return None
             
             motion_module = MOTION_PLANNING_MODULES[planning_utils_version]
@@ -921,15 +944,15 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     
     def _get_motion_planning_algorithm(self, motion_module, algorithm):
         if algorithm == 'direct':
-            return motion_module.direct_path
+            return motion_module.rrt_connect.direct_path
         elif algorithm == 'birrt':
-            return motion_module.birrt 
+            return motion_module.rrt_connect.birrt 
         elif algorithm == 'rrt_star':
-            return motion_module.rrt_star 
+            return motion_module.rrt_star.rrt_star 
         elif algorithm == 'rrt':
-            return motion_module.rrt 
+            return motion_module.rrt.rrt
         elif algorithm == 'lazy_prm':
-            return motion_module.lazy_prm_replan_loop 
+            return motion_module.lazy_prm.lazy_prm_replan_loop 
         else:
             raise ValueError(f"Inappropriate argument algorithm={algorithm}. Expected one of: 'direct', 'birrt', 'rrt_star', 'rrt', or 'lazy_prm'")
 
@@ -1185,28 +1208,18 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
 
     def get_motion_gen(self):
-        robot = self._motion_planner.robot
         robot_id = self._motion_planner.robot_id
         joint_ids = self._arm_joint_ids
         def qfree_traj(q1:JointPos, q2:JointPos, grasp:BodyGrasp=None, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
-            with UndoableContext(robot):
-                # q1.assign()
-                self.set_arm_config(q1)
-                self._get_robot_arm_collision_fn()
-                # Temporarily use only specified obstacles for motion planner
-                original_mp_obstacles = self._motion_planner.mp_obstacles
-                self._motion_planner.mp_obstacles = set(self.get_collidable_body_ids()) | self.assign_poses(atpose_fluents)
-                # Calculate arm trajectory
-                path = self._motion_planner.plan_arm_motion(q2)
-                # Reassign old mp_obstacles to original value
-                self._motion_planner.mp_obstacles = original_mp_obstacles
-                # Return value
-                if path is not None:
-                    command = Command([BodyPath(robot_id, path, joints=joint_ids)]) if path is not None else None
-                    return (command,)
-                else:
-                    return tuple()
-
+            obstacles = set(self.get_collidable_body_ids()) | self.assign_poses(atpose_fluents)
+            path = self.plan_arm_joint_motion(q1=q1, q2=q2, obstacles=obstacles, attachments=[grasp.attachment()])
+            print(f"Path: {path}")
+            if path is not None:
+                command = Command([BodyPath(robot_id, path, joints=joint_ids)])
+                return (command,)
+            else:
+                return tuple()
+                
         def _consistency_check(q:KinematicConstraint) -> None:
             if isinstance(q,BodyConf):
                 assert (q.body == robot_id) and (q.joints == joint_ids)
@@ -1214,12 +1227,12 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 assert (q.body == robot_id)
 
         ft.wraps(qfree_traj)
-        def wrapper(q1:KinematicConstraint, q2:KinematicConstraint, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
+        def wrapper(q1:KinematicConstraint, q2:KinematicConstraint, grasp:BodyGrasp=None, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
             _consistency_check(q1)
             _consistency_check(q2)
             q1 = self._as_arm_config(q1)
             q2 = self._as_arm_config(q2)
-            return qfree_traj(q1, q2, atpose_fluents=atpose_fluents)
+            return qfree_traj(q1, q2, grasp=grasp, atpose_fluents=atpose_fluents)
         return wrapper 
 
 

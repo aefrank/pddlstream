@@ -5,6 +5,8 @@ from itertools import filterfalse, tee
 import os
 import sys
 from typing import Iterable, List, Optional, Tuple, Union
+
+import numpy as np
 # import igibson
 # from igibson import object_states
 # from igibson.envs.igibson_env import iGibsonEnv
@@ -84,7 +86,7 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
         'sample-grasp': from_gen_fn(ig.get_grasp_gen()),
         'inverse-kinematics': from_fn(ig.get_grasp_traj_fn()),
         'plan-free-motion': from_fn(ig.get_free_motion_gen()),
-        # 'plan-holding-motion': from_fn(get_holding_motion_gen(robot, fixed, teleport)),
+        'plan-holding-motion': from_fn(ig.get_motion_gen()),
 
         'test-cfree-pose-pose': from_test(ig.get_cfree_pose_pose_test()),
         'test-cfree-approach-pose': from_test(ig.get_cfree_approach_obj_pose_test()),
@@ -101,7 +103,45 @@ def pddlstream_from_problem(ig:MyiGibsonSemanticInterface, movable=[], teleport=
     # _test__ik_stream(ig, stream_map, target)
     # _test__plan_free_motion_stream(ig, stream_map, init, target)
     # _test__test_cfree_approach_pose(ig, stream_map, target)
-    _test__test_cfree_traj_pose(ig, stream_map, obstacle=target)
+    # _test__test_cfree_traj_pose(ig, stream_map, obstacle=target)
+    _test__plan_holding_motion_stream(ig, stream_map, init, target)
+
+
+def _test__plan_holding_motion_stream(ig:MyiGibsonSemanticInterface, stream_map:dict, state:List, target:str):
+    atpose_fluents = [fluent for fluent in state if fluent[0].lower()=='atpose' and fluent[1].lower() != target]
+    print("AtPose Fluents: ", [(name, obj, tuple(ig._fmt_num_iter(p) for p in pose)) for name,obj,pose in atpose_fluents])
+    grasp = next(stream_map['sample-grasp'](target))[0][0]
+
+    # Trajectory = returning to home position after having grasped object
+    # grasp_pose -> approach_pose -> home pose
+    p1 = grasp.grasp_pose
+    q1 = ig.arm_ik(*p1)
+    p2 = (grasp.approach_pose[0], None)
+    q2 = ig.arm_ik(*p2)
+    # Home position
+    joint_vector_indices = ig._motion_planner.robot_arm_indices
+    q3 = tuple(np.array(ig._robot.untucked_default_joint_pos)[joint_vector_indices])
+    p3 = ig.arm_fk(q3)
+
+    # print(f"Start:  Config:  {ig._fmt_num_iter(q1)} \tPose:  {'  '.join(ig._fmt_num_iter(p) for p in p1 if p is not None)}")
+    # print(f"Goal:   Config:  {ig._fmt_num_iter(q2)} \tPose:  {'  '.join(ig._fmt_num_iter(p) for p in p2 if p is not None)}")
+    # # print("Goal config: ", ig._fmt_num_iter(q2))
+    # stream = stream_map['plan-holding-motion'](q1, q2, grasp, atpose_fluents=atpose_fluents)
+    # sample = next(stream)[0]
+    # print(sample)
+    # command = sample[0]
+    # print_Command(ig, command)
+
+    # print("\n")
+    
+    print(f"Start:  Config:  {ig._fmt_num_iter(q2)} \tPose:  {'  '.join(ig._fmt_num_iter(p) for p in p2 if p is not None)}")
+    print(f"Goal:   Config:  {ig._fmt_num_iter(q3)} \tPose:  {'  '.join(ig._fmt_num_iter(p) for p in p3 if p is not None)}")
+    stream = stream_map['plan-holding-motion'](q2, q3, grasp, atpose_fluents=atpose_fluents)
+    sample = next(stream)[0]
+    print(sample)
+    command = sample[0]
+    print_Command(ig, command)
+
 
 
 def _test__test_cfree_traj_pose(ig:MyiGibsonSemanticInterface, stream_map:dict, obstacle:str,

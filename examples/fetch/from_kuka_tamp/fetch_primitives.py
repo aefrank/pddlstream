@@ -1,3 +1,4 @@
+import argparse
 from collections import UserDict
 from enum import Enum
 import functools as ft
@@ -120,7 +121,12 @@ def is_iterable_with(
 
 
 def is_numeric(x:Any):
-    return isinstance(x,(int,float))
+    try: 
+        float(x)
+        return True
+    except Exception:
+        return False
+    # return isinstance(x,(int,float))
 
 def is_numeric_vector(v:Any):
     # return hasattr(v, "__iter__") and all(is_numeric(x) for x in v)
@@ -135,6 +141,54 @@ def nonstring_iterable(v:Any) -> Iterator:
     else: return iter(v)
 
 
+def eagermap(__func, *__iterables):
+    return [__func(*elems) for elems in zip(*__iterables)]
+
+
+def recursive_map(fn, itr, end_condition=(lambda elem: not is_nonstring_iterable(elem)), lazy=False, preserve_iterable_types=True):
+    def as_structure_safe(__map):
+        def maintain_type(_original, _mapped):
+            return type(_original)(_mapped) if not isinstance(_original, np.ndarray) else np.array(_mapped)
+        def structure_safe_map(__func, __iterable):
+            return maintain_type(__iterable, __map(__func, __iterable))
+        return structure_safe_map
+    def customize_map(lazy, preserve_iterable_types):
+        return as_structure_safe(_map := map if lazy else eagermap) if preserve_iterable_types else _map
+
+    local_map = customize_map(lazy, preserve_iterable_types)
+    return local_map(recursion := lambda itr: fn(itr) if end_condition(itr) else local_map(recursion, itr), itr)
+            
+
+
+
+    
+def round_numeric(x:Any, dec:int=3):
+    '''Round numeric x or elements of x (if x is iterable) to 'dec' places if numeric. 
+    Any non-numeric x or element of x is returned/included as is.
+    '''
+    
+    def _recursion(*elems:List[Any], lazy=False) -> List[Any]:
+        '''Recursively traverse x and round any numeric values found to 'dec' places. 
+        '''
+        array = lambda arr: np.array(arr)
+        constr = lambda itr: type(itr) if not isinstance(itr, np.ndarray) else array # np.ndarray constructor edge case
+        
+        eagermap = lambda func, itr: constr(itr)([func(e) for e in itr]) # force eager evaluation
+        _map = map if lazy else eagermap
+
+        base_case = lambda elem: round(elem,3) if is_numeric(elem) else elem
+        recursive_case = lambda elem: _map(recursive_case,elem) if is_nonstring_iterable(elem) else base_case(elem)
+        # return _map(recursive_case, elems)
+    
+        return recursive_map(base_case, elems, lazy=False)
+
+    
+    y, *_ = _recursion(x) # y will be wrapped in an extra layer
+    return y
+
+
+    
+
 
 
 
@@ -144,6 +198,9 @@ class iGibsonSemanticInterface:
 
     def __init__(self, env:iGibsonEnv):
         self._env = env
+
+    def close(self):
+        self._env.close()
 
     @property
     def env(self) -> iGibsonEnv:
@@ -287,7 +344,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
     ################################################################################
 
-    def __init__(self, config_file:str, objects:Collection[ObjectSpec], *, headless:bool=True, verbose=True):
+    def __init__(self, config_file:str, objects:Collection[ObjectSpec]=[], *, headless:bool=True, verbose=True):
         self._igibson_setup(config_file=config_file, headless=headless)
         self.load_objects(objects, verbose=verbose)
         self._init_object_state(objects,verbose=verbose)
@@ -366,7 +423,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         # Return obj body_ids
         return sim_obj.get_body_ids()
 
-    def load_objects(self, specifications:Collection[Union[str,dict]], verbose:bool=True) -> None:
+    def load_objects(self, specifications:Iterable[Union[str,dict]], verbose:bool=True) -> None:
         '''Load objects into simulator based on a list of categories.
         ''' 
         body_ids_by_object = {}
@@ -376,7 +433,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             body_ids_by_object[spec["name"]] = body_ids 
         return body_ids_by_object
     
-    def _init_object_state(self, obj_specs:Collection[ObjectSpec], *, verbose=True) -> None:
+    def _init_object_state(self, obj_specs:Iterable[ObjectSpec], *, verbose=True) -> None:
         for spec in obj_specs:
             assert isinstance(spec, dict)
             if not isinstance(spec,ObjectSpec): 
@@ -1338,7 +1395,36 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
     ################################################################################
 
+def format_config(conf:Union[BodyConf,JointPos], dec=3):
+    if isinstance(conf,BodyConf):
+        conf = conf.configuration
+    conf = round_numeric(conf, dec)
+    return conf
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-g','--gui', action='store_true', help='Simulates the system')
+    args = parser.parse_args()
     
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    config = "fetch_tamp.yaml"
+    config_path = os.path.join(dir_path,config)
+
+    sim = MyiGibsonSemanticInterface(
+        config_file=config_path, 
+        headless=(not args.gui)
+    )
+
+    # x = sim.get_arm_config()
+    # config_pprint_str(x)
+    x = sim.get_pose(sim.robot_id) #[0][0]
+    print(x)
+    print(round_numeric(x))
+    # print(truncate_floats(x))
+
+
+
+
 
 
 # TODO: put this in objspec file
@@ -1363,4 +1449,6 @@ def _as_urdf_spec(spec:Union[str,dict]) -> "URDFObjectSpec":
 
 
     
+if __name__=="__main__":
+    main()
     

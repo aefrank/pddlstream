@@ -1,207 +1,112 @@
-import argparse
-from collections import UserDict
-from enum import Enum
-import functools as ft
-from itertools import product
-import math
-import os
-import sys
-from typing import Any, Callable, Collection, Set, Iterator, Iterable, List, Optional, Tuple, Type, TypeVar, Union
+########################################################################################################################
+##########################################    IMPORTS    ###############################################################
+########################################################################################################################
+import importlib
+from typing import \
+    Any, Callable, Collection, Dict, NewType, Set, Iterable, List, Optional, Tuple, Type, Union, \
+    get_args
 from typing_extensions import TypeAlias
+from enum import Enum
+
+import functools as ft
+import os, sys, math
+from itertools import product
+import argparse
 
 import pybullet as pb
 import numpy as np
-
-from igibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
-from igibson.action_primitives.starter_semantic_action_primitives import GRASP_APPROACH_DISTANCE, MAX_ATTEMPTS_FOR_SAMPLING_POSE_WITH_OBJECT_AND_PREDICATE, PREDICATE_SAMPLING_Z_OFFSET, UndoableContext
-from igibson import object_states
-from igibson.external.pybullet_tools.utils import (
-    all_between, 
-    get_aabb, 
-    get_custom_limits, 
-    get_moving_links, 
-    get_self_link_pairs, 
-    is_collision_free, 
-    link_from_name, 
-    pairwise_collision, 
-    pairwise_link_collision, 
-    set_joint_positions
-)
-from igibson.object_states.utils import sample_kinematics
-from igibson.objects.object_base import BaseObject
-from igibson.envs.igibson_env import iGibsonEnv
-from igibson.robots import BaseRobot
-from igibson.robots.robot_base import RobotLink
-from igibson.scenes.igibson_indoor_scene import URDFObject
-from igibson.utils.assets_utils import get_ig_avg_category_specs
-from igibson.utils.behavior_robot_motion_planning_utils import HAND_MAX_DISTANCE
-from igibson.utils.grasp_planning_utils import get_grasp_poses_for_object
-from igibson.utils.motion_planning_wrapper import MotionPlanningWrapper
-from igibson.utils.utils import parse_config, quatToXYZW
 from transforms3d.euler import euler2quat
 
-from examples.fetch.from_kuka_tamp.object_spec import (
-    Euler,
-    ObjectSpec,
-    Orientation3D,
-    Position3D,
-    Quaternion, 
-    URDFObjectSpec,
-    Orientation, 
-    Position,
-    UniqueID, 
-)
-from examples.pybullet.utils.pybullet_tools.kuka_primitives import (
-    Attach,
-    BodyConf,
-    BodyGrasp,
-    BodyPath, 
-    BodyPose,
-    Command,
-)
-from examples.pybullet.utils.pybullet_tools.utils import MAX_DISTANCE, Attachment, check_initial_end, get_client, get_distance_fn, get_extend_fn, get_joint_positions, get_sample_fn, interpolate_poses, inverse_kinematics_helper, plan_direct_joint_motion, plan_joint_motion, plan_waypoints_joint_motion, quat_from_euler
 
+# iGibson modules
+from igibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
+from igibson.action_primitives.starter_semantic_action_primitives import \
+    UndoableContext, GRASP_APPROACH_DISTANCE, MAX_ATTEMPTS_FOR_SAMPLING_POSE_WITH_OBJECT_AND_PREDICATE, PREDICATE_SAMPLING_Z_OFFSET
+from igibson import object_states
+
+from igibson.envs.igibson_env import iGibsonEnv
+from igibson.utils.motion_planning_wrapper import MotionPlanningWrapper
+from igibson.objects.object_base import BaseObject
+from igibson.objects.articulated_object import URDFObject
+from igibson.robots import BaseRobot
+from igibson.robots.robot_base import RobotLink
+
+from igibson.utils.utils import parse_config, quatToXYZW
+from igibson.utils.assets_utils import get_ig_avg_category_specs
+from igibson.object_states.utils import sample_kinematics
+from igibson.utils.grasp_planning_utils import get_grasp_poses_for_object
+from igibson.utils.behavior_robot_motion_planning_utils import HAND_MAX_DISTANCE
+
+
+
+# Custom modules
+from .object_spec import \
+    ObjectSpec, Orientation, Position, _as_urdf_spec
+from examples.fetch.from_kuka_tamp.utils import \
+    is_numeric_vector, nonstring_iterable, recursive_map_advanced, round_numeric
+
+
+# PYBULLET TOOLS 
+# TODO: investigate differences between those found at examples.pybullet.utils.pybullet_tools vs igibson.external.pybullet_tools
+from examples.pybullet.utils.pybullet_tools.kuka_primitives import \
+    Attach, BodyConf, BodyGrasp, BodyPath, BodyPose, Command
+from examples.pybullet.utils.pybullet_tools.utils import \
+    Attachment, get_client, get_joint_positions, get_sample_fn, interpolate_poses, quat_from_euler
+from igibson.external.pybullet_tools.utils import \
+    all_between, get_aabb, get_custom_limits, get_moving_links, get_self_link_pairs, is_collision_free, link_from_name, \
+    pairwise_collision, pairwise_link_collision, set_joint_positions
+
+
+###################   Disambiguating different versions of utils   #########################
 # Pybullet Planning implementation: original by Caelan Reed Garrett vs. iGibson version 
-PlanningUtilsVersion = Enum('PBToolsImpl', ['PDDLSTREAM', 'IGIBSON'])
-import examples.pybullet.utils.pybullet_tools.utils as pbtools_ps
-import igibson.external.pybullet_tools.utils as pbtools_ig
+# TODO: Incorporate other possibly-ambiguous functions 
+
+PybulletToolsVersion = Enum('PybulletToolsVersion', ['PDDLSTREAM', 'IGIBSON'])
+STREAM = PybulletToolsVersion.PDDLSTREAM
+IGIBSON = PybulletToolsVersion.IGIBSON
+
+IMPORT_FROM = {
+    STREAM : 'examples.pybullet.utils',
+    IGIBSON : 'igibson.external'
+}
+
+# import .utils as pbtools_ps
+# .utils as pbtools_ig
 
 import examples.pybullet.utils.motion.motion_planners as motion_ps
 import igibson.external.motion.motion_planners as motion_ig
 PYBULLET_TOOLS_MODULES = {
-    PlanningUtilsVersion.PDDLSTREAM : pbtools_ps,
-    PlanningUtilsVersion.IGIBSON : pbtools_ig
+    STREAM :  importlib.import_module('pybullet_tools', IMPORT_FROM[STREAM]),
+    IGIBSON : importlib.import_module('pybullet_tools', IMPORT_FROM[IGIBSON]),
 }
 MOTION_PLANNING_MODULES = {
-    PlanningUtilsVersion.PDDLSTREAM : motion_ps,
-    PlanningUtilsVersion.IGIBSON : motion_ig
+    STREAM:   importlib.import_module('motion.motion_planners', IMPORT_FROM[STREAM]),
+    IGIBSON : importlib.import_module('motion.motion_planners', IMPORT_FROM[IGIBSON]),
 }
 
-
-
-# Opt: TypeAlias = Optional[Any]
+################# Custom types for slightly more "self-documenting" code #######################
 # T = TypeVar('T')
 
-JointPos: TypeAlias = Iterable[float]
+BID = NewType('BID', int) # body_id that can be used with pybullet/pybullet_tools
+JID = NewType('JID', int) # link/joint id that can be used with pybullet/pybullet_tools
+
+UID: TypeAlias = Union[str,int] # any kind of concise name/id that uniquely identifies something
+Object: TypeAlias = Union[UID,BaseObject]
+Robot: TypeAlias = Union[UID,BaseRobot]
+
+JointPos = Iterable[float]
 Pose: TypeAlias = Tuple[Position,Orientation]
 # Arm kinematic specification/constraint
 KinematicConstraint: TypeAlias = Union[BodyConf,BodyPose,JointPos,Pose,Position,Orientation]
-
-
-
-# def handle_object_name(*objargs):
-#     def _get_obj_from_name(env,name)
-    
-#     def decorator(func):
-#         @ft.wraps(func)
-#         def wrapper(*args, **kwargs):
-#             for oa in objargs:
-#                 if isinstance(oa,int):
-#                     args[oa]
-#                 else:
-#                     kwargs[oa]
-#             return func(*args, **kwargs)
-
-def elements_satisfy(iterable:Iterable, condition:Callable[[Any],bool])->bool:
-    return all(condition(elem) for elem in iterable)
-
-def is_iterable_with(
-        iterable:Iterable, 
-        condition:Optional[Callable[[Iterable],bool]]=lambda it: True, 
-        element_condition:Optional[Callable[[Any],bool]]=None
-) -> bool:
-    return (
-        # confirm that iterable is indeed an Iterable
-        hasattr(iterable, "__iter__") and               
-        # if condition was specified, confirm that iterable satisfies it
-        (condition is None or condition(iterable)) and  
-         # if element_condition was specified, confirm that every element in iterable satisfies it
-        (element_condition is None or all(element_condition(elem) for elem in iterable))   
-    )
-
-
-def is_numeric(x:Any):
-    try: 
-        float(x)
-        return True
-    except Exception:
-        return False
-    # return isinstance(x,(int,float))
-
-def is_numeric_vector(v:Any):
-    # return hasattr(v, "__iter__") and all(is_numeric(x) for x in v)
-    return is_iterable_with(v, element_condition=is_numeric)
-
-def is_nonstring_iterable(x:Any) -> bool:
-    return hasattr(x, "__iter__") and not isinstance(x, str)
-    
-def nonstring_iterable(v:Any) -> Iterator:
-    if is_nonstring_iterable(v): return iter(v)
-    elif isinstance(v,str): return iter([v])
-    else: return iter(v)
-
-
-def eagermap(__func, *__iterables):
-    return [__func(*elems) for elems in zip(*__iterables)]
-
-
-def recursive_map(fn, itr, end_condition=(lambda elem: not is_nonstring_iterable(elem)), lazy=False, preserve_iterable_types=True):
-    def as_structure_safe(__map):
-        def maintain_type(_original, _mapped):
-            return type(_original)(_mapped) if not isinstance(_original, np.ndarray) else np.array(_mapped)
-        def structure_safe_map(__func, __iterable):
-            return maintain_type(__iterable, __map(__func, __iterable))
-        return structure_safe_map
-    def customize_map(lazy, preserve_iterable_types):
-        return as_structure_safe(_map := map if lazy else eagermap) if preserve_iterable_types else _map
-
-    local_map = customize_map(lazy, preserve_iterable_types)
-    return local_map(recursion := lambda itr: fn(itr) if end_condition(itr) else local_map(recursion, itr), itr)
-            
-
-
-
-    
-def round_numeric(x:Any, dec:int=3):
-    '''Round numeric x or elements of x (if x is iterable) to 'dec' places if numeric. 
-    Any non-numeric x or element of x is returned/included as is.
-    '''
-    
-    def _recursion(*elems:List[Any], lazy=False) -> List[Any]:
-        '''Recursively traverse x and round any numeric values found to 'dec' places. 
-        '''
-        array = lambda arr: np.array(arr)
-        constr = lambda itr: type(itr) if not isinstance(itr, np.ndarray) else array # np.ndarray constructor edge case
-        
-        eagermap = lambda func, itr: constr(itr)([func(e) for e in itr]) # force eager evaluation
-        _map = map if lazy else eagermap
-
-        base_case = lambda elem: round(elem,3) if is_numeric(elem) else elem
-        recursive_case = lambda elem: _map(recursive_case,elem) if is_nonstring_iterable(elem) else base_case(elem)
-        # return _map(recursive_case, elems)
-    
-        return recursive_map(base_case, elems, lazy=False)
-
-    
-    y, *_ = _recursion(x) # y will be wrapped in an extra layer
-    return y
-
-
-    
-
-
-
-
-
 
 class iGibsonSemanticInterface:
 
     def __init__(self, env:iGibsonEnv):
         self._env = env
-
     def close(self):
         self._env.close()
 
+    ################################ Basic data/component access ################################
     @property
     def env(self) -> iGibsonEnv:
         return self._env
@@ -217,20 +122,23 @@ class iGibsonSemanticInterface:
     @property
     def objects(self) -> List[str]:
         return [obj.name for obj in self.env.scene.get_objects() if obj not in self.env.robots]
-
-    # Object querying
-    def get_id(self, obj:Union[UniqueID,BaseObject]) -> int:
-        if isinstance(obj,BaseObject): return obj.get_body_ids()[0]
-        elif isinstance(obj,str): return self._get_bodyids_from_name(obj)[0]
+    
+    ################################ Object query handling ################################
+    # Translating between object names (str), pybullet body ids (BID), and python objects (BaseObject)
+    def get_bid(self, obj:Object) -> BID:
+        return self._get_bids(obj)[0]
+    def _get_bids(self, obj:Object) -> List[BID]:
+        if isinstance(obj,BaseObject): return obj.get_body_ids()
+        elif isinstance(obj,str): return self._get_bodyids_from_name(obj)
         elif isinstance(obj,int):
-            assert obj in self.env.scene.objects_by_id, f"invalid body_id {obj}"
-            return obj
+            assert obj in self.env.scene.objects_by_id, f"invalid body_id {obj}; not found in simulator"
+            return [obj]
         else:
             raise TypeError(
                 f"Inappropriate argument obj={obj} of type {type(obj)}. " 
                 "Expected BaseObject, str, or int"
             )
-    def get_name(self, obj:Union[UniqueID,BaseObject]) -> BaseObject:
+    def get_name(self, obj:Object) -> BaseObject:
         if isinstance(obj, BaseObject): return self._get_name_from_obj(obj)
         elif isinstance(obj,int):       return self._get_name_from_bodyid(obj)
         elif isinstance(obj,str):       
@@ -241,7 +149,7 @@ class iGibsonSemanticInterface:
                 f"Inappropriate argument obj={obj} of type {type(obj)}. " 
                 "Expected BaseObject, str, or int"
             )
-    def get_object(self, obj:Union[UniqueID,BaseObject]) -> BaseObject:
+    def get_object(self, obj:Object) -> BaseObject:
         if isinstance(obj, BaseObject): 
             assert obj in self._objects, f"object '{obj}' not found in current scene"
             return obj
@@ -259,14 +167,12 @@ class iGibsonSemanticInterface:
     def _get_object_from_name(self, name:str) -> BaseObject:
         assert isinstance(name,str),  f"Invalid argument 'name' of type {type(name)}: {name}"
         return self.env.scene.objects_by_name[name]
-    
     def _get_bodyids_from_name(self, name:str) -> List[int]:
         assert isinstance(name,str), f"Invalid argument 'name' of type {type(name)}: {name}"
         return self.env.scene.objects_by_name[name].get_body_ids()
     def _get_bodyids_from_obj(self, obj:BaseObject) -> List[int]:
         assert isinstance(obj,BaseObject), f"Invalid argument 'obj' of type {type(obj)}: {obj}"
         return obj.get_body_ids()
-    
     def _get_name_from_bodyid(self, body_id:int) -> str:
         assert isinstance(body_id,int), f"Invalid argument 'body_id' of type {type(body_id)}: {body_id}"
         return self.env.scene.objects_by_id[body_id].name
@@ -274,25 +180,25 @@ class iGibsonSemanticInterface:
         assert isinstance(obj,BaseObject), f"Invalid argument 'obj' of type {type(obj)}: {obj}"
         return obj.name
         
-
+    ################################ Object State Handling ################################
     # Position getter/setter
-    def get_position(self, body:UniqueID) -> Position:
+    def get_position(self, body:UID) -> Position:
         return self.get_object(body).get_position()
-    def set_position(self, body:UniqueID, position:Position) -> None:
+    def set_position(self, body:UID, position:Position) -> None:
         self.get_object(body).set_position(pos=position)
 
     # Orientation getter/setter
-    def get_orientation(self, body:UniqueID) -> Orientation:
+    def get_orientation(self, body:UID) -> Orientation:
         return self.get_object(body).get_orientation()    
-    def set_orientation(self, body:UniqueID, orientation:Orientation, *, force_quaternion=False) -> None:
+    def set_orientation(self, body:UID, orientation:Orientation, *, force_quaternion=False) -> None:
         if force_quaternion and len(orientation)==3:
             orientation = quatToXYZW(euler2quat(*orientation), "wxyz")
         self.get_object(body).set_orientation(orn=orientation)
 
     # Combined Position and Orientation getter/setter
-    def get_position_orientation(self, body:UniqueID) -> Pose:
+    def get_position_orientation(self, body:UID) -> Pose:
         return self.get_object(body).get_position_orientation()
-    def set_position_orientation(self, body:UniqueID, 
+    def set_position_orientation(self, body:UID, 
                                  position:Position, 
                                  orientation:Orientation, 
                                  *, 
@@ -300,16 +206,22 @@ class iGibsonSemanticInterface:
         self.set_position(body=body, position=position)
         self.set_orientation(body=body, orientation=orientation, force_quaternion=force_quaternion)
 
-    # Joint states
-    def get_joint_states(self, body:UniqueID):
+    # Joint config getter/setters
+    def get_joint_positions(self, body:UID, joints:Iterable[int]) -> JointPos:
+        return get_joint_positions(body, joints)
+    def set_joint_positions(self, body:UID, joints:Iterable[int], values:JointPos):
+        return set_joint_positions(body, joints, values)
+    def get_joint_states(self, body:UID) -> Dict[str,Iterable[Tuple[float,float]]]:
+        '''Returned as dictionary {"joint_name":(q, qdot)}'''
         return self.get_object(body).get_joint_states()
-
-
+    
+################################################################################################
+################################################################################################
     
 
 class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
-
+    ################################ Basic data/component access ################################
     @property
     def _robot(self) -> BaseRobot:
         assert len(self._robots)==1, \
@@ -322,39 +234,36 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         return self.robots[0]
     @property 
     def robot_id(self) -> int:
-        return self.get_id(self._robot)
-
+        return self.get_bid(self._robot)
     @property
     def _eef(self) -> RobotLink:
         return self._robot.eef_links[self._robot.default_arm]
-        # return self._robot._links[self.eef]
     @property
     def eef(self) -> str:
         return self._robot.eef_link_names[self._robot.default_arm]
     @property
-    def eef_id(self) -> int:
+    def eef_link(self) -> int:
         return self._eef.link_id 
-    
     @property
     def _arm_joint_ids(self) -> List[int]:
         return self._motion_planner.arm_joint_ids
 
-
-
-
-    ################################################################################
-
+    ################################### Initialize Environment #####################################
+    # TODO: generalize
     def __init__(self, config_file:str, objects:Collection[ObjectSpec]=[], *, headless:bool=True, verbose=True):
-        self._igibson_setup(config_file=config_file, headless=headless)
+        self._init_igibson(config_file=config_file, headless=headless)
         self.load_objects(objects, verbose=verbose)
         self._init_object_state(objects,verbose=verbose)
         self._init_robot_state()
 
-    
-    def _igibson_setup(self, config_file:str, headless:bool=True) -> Tuple[iGibsonEnv, MotionPlanningWrapper]:
-        config = self._load_config(config_file=config_file)
+    def _init_igibson(self, config:Union[str,dict]={}, headless:bool=True) -> Tuple[iGibsonEnv, MotionPlanningWrapper]:
+        # Load simulation config
+        if isinstance(config,str): 
+            config = self._load_config(config_file=config)
+        assert isinstance(config,dict)
         if not config['robot']['name'] == 'Fetch':
-            raise NotImplementedError("Only implemented for a single Fetch robot.")
+            raise NotImplementedError(f"{self.__class__.__name__} is only currently implemented for a single Fetch robot.")
+        # Initialize iGibson simulation environment
         env = iGibsonEnv(
             config_file=config,
             mode="gui_interactive" if not headless else "headless",
@@ -362,7 +271,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             physics_timestep=1.0 / 120.0,
         ) 
         self._env = env
-        
+        # Setup motion planning wrapper
         motion_planner = MotionPlanningWrapper(
             self.env,
             optimize_iter=10,
@@ -372,7 +281,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             visualize_2d_result=False,
         )
         self._motion_planner = motion_planner
-
+        # Setup viewer if needed
         if not headless:
             self._viewer_setup()
     
@@ -380,18 +289,17 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         config_file = os.path.abspath(config_file)
         config_data = parse_config(config_file)
 
-        config_data["load_object_categories"] = []  # accelerate loading (only building structures)
-        config_data["visible_target"] = False
-        config_data["visible_path"] = False
+        # # specific tuning
+        # config_data["load_object_categories"] = []  # accelerate loading (only building structures)
+        # config_data["visible_target"] = False
+        # config_data["visible_path"] = False
 
         # Reduce texture scale for Mac.
-        if sys.platform == "darwin":
-            config_data["texture_scale"] = 0.5
-        
+        if sys.platform == "darwin":    config_data["texture_scale"] = 0.5
+        # Save config data to private field 
         self._config = config_data
         return self._config
     
-
     def _viewer_setup(self) -> None:
         # Set viewer camera 
         self.env.simulator.viewer.initial_pos = [-0.8, 0.7, 1.7]
@@ -463,35 +371,32 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         ),
         "orientation" : (
             lambda self, body: self.get_orientation(body), 
-            lambda self, body,val: ft.partial(self.set_orientation, force_quaternion=True)(body,val)
+            lambda self, body, val: ft.partial(self.set_orientation, force_quaternion=True)(body,val)
         ),
     }
     assert set(_states) == set(_state_access_map)
 
-    def get_state(self, body:UniqueID, state:str) -> Any:
-        assert state in self._states
+    def get_state(self, body:UID, state:str) -> Any:
+        assert state in self._states, f"state '{state}' not registered in '_states' field of MyiGibsonSemanticInterface object."
         return MyiGibsonSemanticInterface._state_access_map[state][0](self,body)
     
-    def set_state(self, body:UniqueID, state:str, value:Any) -> None:
-        assert state in self._states
+    def set_state(self, body:UID, state:str, value:Any) -> None:
+        assert state in self._states, f"state '{state}' not registered in '_states' field of MyiGibsonSemanticInterface object."
         MyiGibsonSemanticInterface._state_access_map[state][1](self, body, value)
 
     # ----------------------------------------------------------------------
 
-    def get_pose(self, body:UniqueID) -> Pose:
+    def get_pose(self, body:UID) -> Pose:
         try:
             return self.get_position_orientation(body)
         except KeyError as e:
-            if body in ("eef", "gripper", self.eef_id):
-                return self.get_eef_pose()
+            if body in ("eef", "gripper", self.eef_link):
+                return self.get_eef_pose() # eef has to be queried differently
             else:
                 raise e
-
-        
-
     
     def set_pose(self, 
-                 body:UniqueID, 
+                 body:UID, 
                  pose:Optional[Pose]=None, 
                  *, 
                  position:Optional[Position]=None, 
@@ -505,58 +410,49 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         self.set_position_orientation(body, pos, orn)
 
     def get_eef_pose(self) -> Pose:
-        # ignored return vals in order are: 
-        #   localInertialFramePosition: Position3D, localInertialFrameOrientation: Quaternion,
-        #   worldLinkFramePosition: Position3D, worldLinkFrameOrientation: Quaternion
-        # In addition, if pybullet.getLinkState is called with computeLinkVelocity=1, there will be two additional return values:
-        #   worldLinkLinearVelocity:Tuple[float,float,float], worldLinkAngularVelocity:Tuple[float,float,float]
-        pos, orn, _, _, _, _ = pb.getLinkState(self.robot_id, self.eef_id, computeForwardKinematics=True, physicsClientId=get_client())
+        '''Queries sim calculate end-effector pose from current arm joint config using forward kinematics.
+        ignored return vals in order are: 
+          localInertialFramePosition: Position3D, localInertialFrameOrientation: Quaternion,
+          worldLinkFramePosition: Position3D, worldLinkFrameOrientation: Quaternion
+        In addition, if pybullet.getLinkState is called with computeLinkVelocity=1, there will be two additional return values:
+          worldLinkLinearVelocity:Tuple[float,float,float], worldLinkAngularVelocity:Tuple[float,float,float]
+          '''
+        pos, orn, _, _, _, _ = pb.getLinkState(self.robot_id, self.eef_link, computeForwardKinematics=True, physicsClientId=get_client())
         return (pos, orn)
     
-
     def get_arm_config(self) -> JointPos:
-        return get_joint_positions(self.robot_id, self._arm_joint_ids)
-    def set_arm_config(self, q:JointPos) -> None:
-        set_joint_positions(self.robot_id, self._arm_joint_ids, q)
+        return self.get_joint_positions(self.robot_id, self._arm_joint_ids)
+    def set_arm_config(self, q:JointPos, attachments:List[Attachment]=[]) -> None:
+        self.set_joint_positions(self.robot_id, self._arm_joint_ids, q)
 
     # ----------------------------------------------------------------------
     
-    def is_movable(self, body: UniqueID):
+    def is_movable(self, body: UID):
         obj = self.get_object(body)
         return not obj.fixed_base
 
-    def is_placement(self, body:UniqueID, surface:UniqueID):
+    def is_on(self, body:UID, surface:UID):
         body    = self.get_object(body)
         surface = self.get_object(body)
         return body.states[object_states.OnTop].get_value(surface)
     
     ################################################################################
 
-    def test_cfree_pose(self, 
-                        body:UniqueID, 
-                        pose:Optional[Pose]=None, 
-                        body2:Optional[UniqueID]=None,
+    def is_collision_free(self, 
+                        body:UID, 
+                        pose: Optional[Pose]=None,  # TODO: update to accept joint config
+                        body2:Optional[UID]=None,
                         pose2:Optional[Pose]=None, 
-                        *,
-                        robot:Optional[Union[BaseRobot,UniqueID]]=None
-                        ) -> bool:
+    ) -> bool:
         assert((pose2 is None) or (body2 is not None)), "cannot specify arg 'pose2' without arg 'body2'"
     
-        if robot is None:
-            robot = self._robot
-        elif isinstance(robot, int):
-            robot = self._robots[robot]
-        elif isinstance(robot, str):
-            robot = self.get_object(robot)
-        assert isinstance(robot, BaseRobot)
-
+        robot = self._robot
         with UndoableContext(robot):
-            
+            body = self.get_bid(body)
             body_links = self.get_object(body).get_body_ids()
-            if isinstance(body,str): 
-                body = self._get_bodyids_from_name(body)[0]
             
             if body2 is not None:
+                body2 = self.get_bid(body2)
                 body2_links = self.get_object(body2).get_body_ids()
                 if isinstance(body2,str): 
                     body2 = self._get_bodyids_from_name(body2)[0]
@@ -574,15 +470,16 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                                      link_b_list=body2_links
                                     )
         
-    def sample_arm_config(self, attachments=[], collisions=True, max_attempts=100):
-        with UndoableContext(self._robot):
-            robot_id = self._motion_planner.robot_id
-            joint_ids = self._motion_planner.arm_joint_ids
-            sample_fn = get_sample_fn(robot_id, joint_ids)
+    def sample_arm_config(self, collisions=True, max_attempts=100):
+        robot = self._robot
+        robot_id = self.robot_id
+        joint_ids = self._arm_joint_ids
+        sample_fn = get_sample_fn(robot_id, joint_ids)
+        with UndoableContext(robot):
             config = sample_fn()
             if collisions:
                 for _ in range(max_attempts):
-                    set_joint_positions(robot_id, joint_ids, config)
+                    self.set_arm_config(config)
                     obstacles = self.get_collidable_body_ids(include_robot=True)
                     if not any(pairwise_collision(robot_id, obs) for obs in obstacles):
                         return config
@@ -591,9 +488,9 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 return config
 
     def sample_placement(self, 
-                         body:UniqueID, 
-                         surface:UniqueID, 
-                         robot:Optional[Union[BaseRobot,UniqueID]]=None
+                         body:UID, 
+                         surface:UID, 
+                         robot:Optional[Union[BaseRobot,UID]]=None
                          ) -> Pose:
         if robot is None:
             robot = self._robot
@@ -628,8 +525,8 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             pos, orn = obj.get_position_orientation()
             return pos, orn
     
-    def get_collidable_body_ids(self, include_robot:Union[bool,UniqueID,BaseRobot]=False):
-        if include_robot is False: # could be the robot's UniqueID
+    def get_collidable_body_ids(self, include_robot:Union[bool,UID,BaseRobot]=False):
+        if include_robot is False: # could be the robot's UID
             disabled_bodies = self._robots
         elif include_robot is True:
             disabled_bodies = []
@@ -651,13 +548,13 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         return obstacle_ids   
     
     def get_collisions(self, 
-                       body:UniqueID, 
-                       obstacles:Collection[UniqueID]=[], 
+                       body:UID, 
+                       obstacles:Collection[UID]=[], 
                        *, 
-                       exclude:Collection[UniqueID]=[], 
-                       critical_obstacles:Collection[UniqueID]=[], 
+                       exclude:Collection[UID]=[], 
+                       critical_obstacles:Collection[UID]=[], 
                        max_distance:float=HAND_MAX_DISTANCE
-                ) -> List[UniqueID]:
+                ) -> List[UID]:
         if not obstacles and not critical_obstacles:
             obstacles = [obj for obj in self.objects if not (obj==body or obj in exclude)]
         obstacles = set(obstacles) - set(exclude)
@@ -666,13 +563,6 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         close_obstacles = (close_objects & set(obstacles)) | set(critical_obstacles)
         collision_ids = [obs for obs in close_obstacles if pairwise_collision(body, obs, max_distance=max_distance)]
         return collision_ids
-
-    def get_all_collisions(self, body:Union[UniqueID, Collection[UniqueID]], obstacles:Collection[UniqueID], *, critical_obstacles=[], max_distance:float=HAND_MAX_DISTANCE):
-        collisions = {
-            bid : self._get_collision(body=bid, obstacles=obstacles, critical_obstacles=critical_obstacles,max_distance=max_distance) 
-            for bid in nonstring_iterable(body)
-        }
-        return collisions
 
     
     def get_robot_arm_collision_params(self,
@@ -704,7 +594,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             disabled_collisions += [collision for collision in fetch_disabled_collisions if collision not in disabled_collisions]
             
             allow_collision_links = set(allow_collision_links)
-            allow_collision_links.add(self.eef_id)
+            allow_collision_links.add(self.eef_link)
             finger_links = set([finger.link_id for finger in robot.finger_links[robot.default_arm]])
             allow_collision_links |= finger_links
             allow_collision_links = list(allow_collision_links)
@@ -734,7 +624,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             # In addition, if pybullet.getLinkState is called with computeLinkVelocity=1, there will be two additional return values:
             #   worldLinkLinearVelocity:Tuple[float,float,float], worldLinkAngularVelocity:Tuple[float,float,float]
             self.set_arm_config(q)
-            pos, orn, _, _, _, _ = pb.getLinkState(self.robot_id, self.eef_id, computeForwardKinematics=True, physicsClientId=get_client())
+            pos, orn, _, _, _, _ = pb.getLinkState(self.robot_id, self.eef_link, computeForwardKinematics=True, physicsClientId=get_client())
             return (pos, orn)
 
     def arm_ik(self, eef_position:Position, eef_orientation:Optional[Orientation]=None, use_nullspace:bool=True, **kwargs) -> Optional[JointPos]:
@@ -748,7 +638,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         ik_spec =  {
             # robot/eef body IDs
             'bodyUniqueId' : self.robot_id, 
-            'endEffectorLinkIndex' : self.eef_id, 
+            'endEffectorLinkIndex' : self.eef_link, 
             # workspace target
             'targetPosition' : eef_position, 
             # IK solver args
@@ -785,17 +675,33 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
         return q
     
-    COLLISION_INPUT_TYPES = Enum('COLLISION_INPUT_TYPES', [
-            'JOINT_CONFIG', 
-            'BODYCONF', 
-            'EEF_POSITION', 
-            'EEF_POSE',
-            'BODYPOSE'
-        ])
+    def as_arm_config(self, kc:KinematicConstraint, disabled_types:Collection[KinematicConstraint]={}):
+        disabled = lambda T: T in disabled_types
+        if not disabled(BodyConf) and self._is_kinematic_constraint(kc,BodyConf):
+            assert (kc.body == self.robot_id),    f"BodyConf {kc} field 'body' does not match body ID of {self.robot}."
+            assert (kc.joints == self._arm_joint_ids), f"BodyConf {kc} field 'joints' does not match arm joint IDs of {self.robot}."
+            q = kc.configuration
+        elif not disabled(BodyPose) and self._is_kinematic_constraint(kc,BodyPose):
+            assert (kc.body==self.robot_id) or (kc.body==self.eef_link) 
+            q = self.arm_ik(*kc.pose)
+        elif not disabled(Pose) and self._is_kinematic_constraint(kc,Pose):
+            q = self.arm_ik(*kc)
+        elif not disabled(JointPos) and self._is_kinematic_constraint(kc,JointPos):
+            q = kc
+        elif not disabled(Position) and self._is_kinematic_constraint(kc,Position):
+            q = self.arm_ik(eef_position=kc)
+        else:
+            raise TypeError(
+                f"Could not interpret input {kc} of type {type(kc)} as a joint configuration or end effector pose. '"
+                f"Expected one of: JointPos, BodyConf, or EEF BodyPose, Position, or Pose. "
+            )
+        assert self._is_kinematic_constraint(q, JointPos)
+        return q
+
     
 
-    def _isinstance_kinematic(self, x:Any, T:Type):
-        '''May give false positives'''
+    def _is_kinematic_constraint(self, x:Any, T:Type=KinematicConstraint) -> bool:
+        '''May give false positives; tests aren't perfect.'''
         tests = {
             BodyConf :    (lambda x: isinstance(x,BodyConf)),
             BodyPose :    (lambda x: isinstance(x,BodyPose)),
@@ -803,31 +709,16 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             Pose :        (lambda x: hasattr(x,"__len__") and len(x)==2 and is_numeric_vector(x[0])),
             Position :    (lambda x: hasattr(x,"__len__") and len(x)==3 and is_numeric_vector(x)),
         }
-        return tests[T](x)
-
-
-    def _as_arm_config(self, x, disabled_types=[]):
-        disabled = lambda T: T in disabled_types
-        if not disabled(BodyConf) and self._isinstance_kinematic(x,BodyConf):
-            assert (x.body == self.robot_id),    f"BodyConf {x} field 'body' does not match body ID of {self.robot}."
-            assert (x.joints == self._arm_joint_ids), f"BodyConf {x} field 'joints' does not match arm joint IDs of {self.robot}."
-            joint_positions = x.configuration
-        elif not disabled(BodyPose) and self._isinstance_kinematic(x,BodyPose):
-            assert (x.body==self.robot_id) or (x.body==self.eef_id) 
-            joint_positions = self.arm_ik(*x.pose)
-        elif not disabled(Pose) and self._isinstance_kinematic(x,Pose):
-            joint_positions = self.arm_ik(*x)
-        elif not disabled(JointPos) and self._isinstance_kinematic(x,JointPos):
-            joint_positions = x
-        elif not disabled(Position) and self._isinstance_kinematic(x,Position):
-            joint_positions = self.arm_ik(eef_position=x)
+        if T==KinematicConstraint: # return true if x passes any KC test
+            return any(t(x) for t in tests.values())
+        elif T in tests:
+            return tests[T](x)
         else:
-            raise TypeError(
-                f"Could not interpret input {x} of type {type(x)} as a joint configuration or end effector pose. '"
-                f"Expected one of: JointPos, BodyConf, or EEF BodyPose, Position, or Pose. "
+            return ValueError(
+                f"Type T={T} is not a KinematicConstraint type. Expected one of {[KinematicConstraint]+get_args(KinematicConstraint)}."
             )
-        assert self._isinstance_kinematic(joint_positions,JointPos)
-        return joint_positions
+
+
 
 
     def _get_robot_arm_collision_fn(self,
@@ -861,18 +752,18 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         ) -> Callable[[KinematicConstraint,Iterable[Attachment]],bool]:
             ft.wraps(qspace_collision_fn)
             def _wrapper(x:KinematicConstraint, attachments:Iterable[Attachment]=[]) -> bool :
-                joint_positions = self._as_arm_config(x)
+                joint_positions = self.as_arm_config(x)
                 return qspace_collision_fn(q=joint_positions, attachments=attachments)
             return _wrapper
                     
         @_ensure_joint_position_vector
         def arm_collision_fn(q:JointPos, attachments:Iterable[Attachment]=[]) -> bool:
             assert len(joint_ids) == len(q)
+            
             with UndoableContext(robot):
                 if not all_between(lower_limits, q, upper_limits):
                     return True
-                
-                set_joint_positions(robot_id, joint_ids, q)
+                self.set_arm_config(q)
                 for attachment in attachments:
                     attachment.assign()
 
@@ -898,8 +789,8 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
     def _get_hand_collision_fn(self, max_distance:float=HAND_MAX_DISTANCE):
         robot:BaseRobot = self._robot
-        eef:UniqueID = self._eef.body_id
-        non_hand_obstacles:Set[UniqueID] = set(obs for obs in self.get_collidable_bodies(include_robot=True) if (obs != eef))
+        eef:UID = self._eef.body_id
+        non_hand_obstacles:Set[UID] = set(obs for obs in self.get_collidable_bodies(include_robot=True) if (obs != eef))
         get_close_objects = lambda body_id: set(x[0] for x in pb.getOverlappingObjects(*get_aabb(body_id)))
         
         def hand_collision_fn(pose3d, obj_in_hand:Optional[BaseObject]=None, *, report_all_collisions:bool=False, verbose:bool=False):
@@ -958,7 +849,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         algorithm:str='birrt',
         ignore_other_scene_obstacles=True,
         *, 
-        planning_utils_version:PlanningUtilsVersion=PlanningUtilsVersion.IGIBSON, 
+        planning_utils_version:PybulletToolsVersion=PybulletToolsVersion.IGIBSON, 
         use_aabb:bool=False, 
         cache:bool=True, 
          **kwargs
@@ -1045,7 +936,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             ignore_other_scene_obstacles=ignore_other_scene_obstacles
         )
 
-        if pbtools_module==PYBULLET_TOOLS_MODULES[PlanningUtilsVersion.PDDLSTREAM]:
+        if pbtools_module==PYBULLET_TOOLS_MODULES[PybulletToolsVersion.PDDLSTREAM]:
             if (weights is None) and (resolutions is not None):
                 weights = np.reciprocal(resolutions)
             distance_fn = pbtools_module.get_distance_fn(robot_id, joint_ids, weights=weights)
@@ -1056,7 +947,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 self_collisions=self_collisions, disabled_collisions=disabled_collisions,
                 use_aabb=use_aabb, cache=cache
             )
-        elif pbtools_module==PYBULLET_TOOLS_MODULES[PlanningUtilsVersion.IGIBSON]:
+        elif pbtools_module==PYBULLET_TOOLS_MODULES[PybulletToolsVersion.IGIBSON]:
             distance_fn = pbtools_module.get_distance_fn(robot_id, joint_ids, weights=weights)
             sample_fn = pbtools_module.get_sample_fn(robot_id, joint_ids)
             extend_fn = pbtools_module.get_extend_fn(robot_id, joint_ids, resolutions=resolutions)
@@ -1068,7 +959,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         else:
             raise ValueError(
                 f"Inappropriate argument pbtools_module={pbtools_module} of type {type(pbtools_module)}. Expected either " 
-                f"{PYBULLET_TOOLS_MODULES[PlanningUtilsVersion.PDDLSTREAM]} or {PYBULLET_TOOLS_MODULES[PlanningUtilsVersion.IGIBSON]}"
+                f"{PYBULLET_TOOLS_MODULES[PybulletToolsVersion.PDDLSTREAM]} or {PYBULLET_TOOLS_MODULES[PybulletToolsVersion.IGIBSON]}"
             )
         return distance_fn, sample_fn, extend_fn, collision_fn
 
@@ -1079,7 +970,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     ################################################################################
     
     def get_stable_gen(self): # -> Generator[Pose, None, None]:
-        def gen(body:UniqueID, surface:UniqueID):
+        def gen(body:UID, surface:UID):
             while True:
                 try:
                     placement = self.sample_placement(body, surface)
@@ -1092,24 +983,24 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     
 
     def get_grasp_gen(self):        
-        def grasps(body:UniqueID):
+        def grasps(body:UID):
             target_obj:BaseObject = self.get_object(body)
             grasp_poses:List[Tuple[BodyPose,Orientation]] = get_grasp_poses_for_object(robot=self._robot, target_obj=target_obj, force_allow_any_extent=False)
             for grasp_pose, target_orn in grasp_poses:
                 approach_position = grasp_pose[0] + target_orn * GRASP_APPROACH_DISTANCE
                 approach_pose = (approach_position, grasp_pose[1])
                 body_grasp = BodyGrasp(
-                    body=self.get_id(target_obj), 
+                    body=self.get_bid(target_obj), 
                     grasp_pose=grasp_pose,
                     approach_pose=approach_pose,
                     robot=self.robot_id,
-                    link=self.eef_id
+                    link=self.eef_link
                 )
                 yield (body_grasp,)
         return grasps
 
 
-    # def get_ik_fn(self, fixed:Optional[List[UniqueID]]=None):
+    # def get_ik_fn(self, fixed:Optional[List[UID]]=None):
     #     robot = self._get_bodyids_from_name(self.robot)[0]
     #     obstacles = [self._get_bodyids_from_name(f)[0] for f in fixed] \
     #                 if fixed is not None \
@@ -1148,7 +1039,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         joint_ids = self._motion_planner.arm_joint_ids
         max_limits, min_limits, rest_position, joint_range, joint_damping = self._motion_planner.get_ik_parameters()
         
-        def calculate_grasp_command(target:UniqueID, grasp:BodyGrasp) -> Tuple[JointPos,Command]:
+        def calculate_grasp_command(target:UID, grasp:BodyGrasp) -> Tuple[JointPos,Command]:
             '''Calculate the actions needed to grasp the target object.
             
             Returns a tuple of a nearby 'approach' position for initiating the grasp, and
@@ -1156,17 +1047,17 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             an Attach action, and then the reversed BodyPath back to the approach pose; 
             or None if no valid path could be found in the number of attempts specified.
 
-            :param target: UniqueID, name or body_id of target object to grasp
+            :param target: UID, name or body_id of target object to grasp
             :param grasp: BodyGrasp, grasp info for environment robot grasping target object with poses in world frame. 
             '''
             with UndoableContext(self._motion_planner.robot):
-                target_id = self.get_id(target)
+                target_bid = self.get_bid(target)
 
                 # Some sanity checks
                 assert isinstance(grasp, BodyGrasp), f"grasp must be defined as a BodyGrasp object, not {type(grasp)}"
                 assert grasp.robot == self.robot_id, f"grasp must be defined for robot body ID {self.robot_id}, not {grasp.robot}" 
-                assert grasp.link == self.eef_id, f"grasp must be defined for eef body ID {self.eef_id}, not {grasp.link}" 
-                assert grasp.body == target_id, f"grasp must be defined for object body ID {target_id}, not {grasp.body}"
+                assert grasp.link == self.eef_link, f"grasp must be defined for eef body ID {self.eef_link}, not {grasp.link}" 
+                assert grasp.body == target_bid, f"grasp must be defined for object body ID {target_bid}, not {grasp.body}"
 
                 ### Get joint angles for desired approach and grasp poses
                 approach_position, _ = grasp.approach_pose
@@ -1181,7 +1072,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                     if path is not None:
                         # Starting at approach config, move to grasp config, perform grasp, and return to approach config
                         command = Command([ BodyPath(self.robot_id, path),
-                                            Attach(target_id, self.robot_id, self.eef_id),
+                                            Attach(target_bid, self.robot_id, self.eef_link),
                                             BodyPath(self.robot_id, path[::-1], attachments=[grasp])])
                         return (approach_config, command)
         return calculate_grasp_command
@@ -1207,18 +1098,18 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
 
     
-    def assign_poses(self, fluents:Iterable[Tuple[UniqueID,...]]) -> Set[int]:
+    def assign_poses(self, fluents:Iterable[Tuple[UID,...]]) -> Set[int]:
         obstacles = set()
         for fluent in fluents:
             name, *args = fluent
             if name.lower() == 'atpose':
                 obj, pose = args
-                obj = self.get_id(obj)
+                obj = self.get_bid(obj)
                 assert isinstance(obj, int)
-                if self._isinstance_kinematic(pose,BodyPose):
+                if self._is_kinematic_constraint(pose,BodyPose):
                     assert pose.body == obj
                     pose = pose.pose
-                assert self._isinstance_kinematic(pose,Pose)
+                assert self._is_kinematic_constraint(pose,Pose)
                 obstacles.add(obj)
                 self.set_pose(obj, pose)
             else:
@@ -1258,8 +1149,8 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         def wrapper(q1:KinematicConstraint, q2:KinematicConstraint, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
             _consistency_check(q1)
             _consistency_check(q2)
-            q1 = self._as_arm_config(q1)
-            q2 = self._as_arm_config(q2)
+            q1 = self.as_arm_config(q1)
+            q2 = self.as_arm_config(q2)
             return qfree_traj(q1, q2, atpose_fluents=atpose_fluents)
         return wrapper
 
@@ -1287,28 +1178,19 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         def wrapper(q1:KinematicConstraint, q2:KinematicConstraint, grasp:BodyGrasp=None, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
             _consistency_check(q1)
             _consistency_check(q2)
-            q1 = self._as_arm_config(q1)
-            q2 = self._as_arm_config(q2)
+            q1 = self.as_arm_config(q1)
+            q2 = self.as_arm_config(q2)
             return qfree_traj(q1, q2, grasp=grasp, atpose_fluents=atpose_fluents)
         return wrapper 
 
 
 
-    # def get_holding_motion_gen(self, robot, fixed=[], teleport=False, self_collisions=True):
-    #     pass
-
-    # def get_movable_collision_test(self):
-    #     pass
-
-    # def get_joint_states(self, body: UniqueID):
-        # only using joint position, not velocity
-        # return [joint[0] for joint in super().get_joint_states(body)]
 
     def get_cfree_pose_pose_test(self):
-        return self.test_cfree_pose
+        return self.is_collision_free
     
     def get_cfree_approach_obj_pose_test(self):
-        def collision_test(b1:UniqueID, p1:Pose, g1:BodyGrasp, b2:UniqueID, p2:Pose) -> bool:
+        def collision_test(b1:UID, p1:Pose, g1:BodyGrasp, b2:UID, p2:Pose) -> bool:
             '''Determine if, when performing grasp g1 on target object b1 with pose p1,
             retracting back from grasp.grasp_pose to grasp.approach_pose will cause b1
             to collide with obstacle object b2 with pose p2.
@@ -1318,7 +1200,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             with UndoableContext(self._robot):
                 self.set_pose(b2, p2)
                 for obj_pose in interpolate_poses(g1.grasp_pose, g1.approach_pose):
-                    collision_free = self.test_cfree_pose(b1,obj_pose,b2,p2)
+                    collision_free = self.is_collision_free(b1,obj_pose,b2,p2)
                     if not collision_free:
                         return True
                     # self.set_pose(b1, obj_pose)
@@ -1326,13 +1208,13 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                     #     return True
                 return False
         
-        def _preprocess_inputs(b1:UniqueID, p1:Union[Pose,BodyPose], g1:BodyGrasp, 
-                               b2:UniqueID, p2:Union[Pose,BodyPose]
+        def _preprocess_inputs(b1:UID, p1:Union[Pose,BodyPose], g1:BodyGrasp, 
+                               b2:UID, p2:Union[Pose,BodyPose]
                             ) -> Tuple[int,Pose,BodyGrasp,int,Pose]:
             if not isinstance(b1, int): 
-                b1 = self.get_id(b1)
+                b1 = self.get_bid(b1)
             if not isinstance(b2, int): 
-                b2 = self.get_id(b2)
+                b2 = self.get_bid(b2)
             if isinstance(p1, BodyPose):
                 assert p1.body == b1
                 p1 = p1.pose
@@ -1342,8 +1224,8 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             assert g1.body == b1
             return b1,p1,g1,b2,p2
 
-        def collision_free_grasp_retrieval_test(b1:UniqueID, p1:Union[Pose,BodyPose], g1:BodyGrasp, 
-                                                b2:UniqueID, p2:Union[Pose,BodyPose]) -> bool:
+        def collision_free_grasp_retrieval_test(b1:UID, p1:Union[Pose,BodyPose], g1:BodyGrasp, 
+                                                b2:UID, p2:Union[Pose,BodyPose]) -> bool:
             '''Returns true if straight line trajectory of body b1 located initially at pose p1 caused by the 
             retrieval motion from g1.grasp_pose to g1.approach_pose is COLLISION-FREE w.r.t. the single obstacle 
             b2 located at pose p2.
@@ -1377,14 +1259,14 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             collision = any(_path_collision_test(path) for path in command.body_paths)
             return collision
         
-        def _preprocess_inputs(command:Command, body:UniqueID, pose:Union[Pose,BodyPose]) -> Tuple[Command,int,Pose]:
-            if not isinstance(body,int): body = self.get_id(body)
+        def _preprocess_inputs(command:Command, body:UID, pose:Union[Pose,BodyPose]) -> Tuple[Command,int,Pose]:
+            if not isinstance(body,int): body = self.get_bid(body)
             if isinstance(pose,BodyPose):
                 assert pose.body == body
                 pose = pose.pose
             return command, body, pose
         
-        def test(command:Command, body:UniqueID, pose:Union[Pose,BodyPose]) -> bool:
+        def test(command:Command, body:UID, pose:Union[Pose,BodyPose]) -> bool:
             '''Returns true if the moving bodies of 'command' DO NOT COLLIDE with 'body' located at pose 'pose'.
             '''
             command, body, pose = _preprocess_inputs(command, body, pose)
@@ -1401,6 +1283,8 @@ def format_config(conf:Union[BodyConf,JointPos], dec=3):
     conf = round_numeric(conf, dec)
     return conf
 
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-g','--gui', action='store_true', help='Simulates the system')
@@ -1415,11 +1299,22 @@ def main():
         headless=(not args.gui)
     )
 
+    def test_fn(nonterminal):
+        return np.cumsum(nonterminal, 0) if isinstance(nonterminal, np.ndarray) else nonterminal
+
     # x = sim.get_arm_config()
     # config_pprint_str(x)
     x = sim.get_pose(sim.robot_id) #[0][0]
     print(x)
-    print(round_numeric(x))
+    processed = recursive_map_advanced(
+        ft.partial(round,ndigits=5), 
+        x, 
+        nonterminal_pre_recursion_fn=test_fn,
+        nonterminal_post_recursion_fn=tuple,
+        preserve_iterable_types=False
+    )
+    print(processed)
+    # print(round_numeric(x))
     # print(truncate_floats(x))
 
 
@@ -1427,25 +1322,7 @@ def main():
 
 
 
-# TODO: put this in objspec file
-def _as_urdf_spec(spec:Union[str,dict]) -> "URDFObjectSpec":
-    # def _obj_attr_check(spec:dict) -> None:
-    #     '''Ensure all necessary keys present in object dict, and no forbidden keys are present.
-    #     '''
-    #     necessary, forbidden = set(['category']), set(cls._states)
-    #     missing = necessary - set(spec)
-    #     extras = forbidden & set(spec)
-    #     if len(missing)>0:  raise ValueError(f"object specification missing necessary key(s) '{missing}':\n{spec}")
-    #     if len(extras)>0:   raise ValueError(f"object specification contains forbidden key(s) '{extras}':\n{spec}")        
 
-    if isinstance(spec, dict) or isinstance(spec,UserDict):
-        urdf_spec = ObjectSpec(**spec).URDF
-    elif isinstance(spec,str): 
-        urdf_spec = URDFObjectSpec(spec)
-    else:
-        raise TypeError(f"Inappropriate argument 'spec' of type {type(spec)}. Expected str or dict.")
-    assert isinstance(urdf_spec, URDFObjectSpec)
-    return urdf_spec
 
 
     

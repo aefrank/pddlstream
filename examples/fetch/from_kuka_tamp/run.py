@@ -5,10 +5,11 @@ from typing import Any, Iterable, List, Optional, Tuple, Union
 
 import argparse
 import os
+import functools as ft
 import numpy as np
 
 from examples.fetch.from_kuka_tamp.fetch_primitives \
-    import MyiGibsonSemanticInterface, is_nonstring_iterable, nonstring_iterable, round_numeric
+    import MyiGibsonSemanticInterface, is_nonstring_iterable, is_numeric, nonstring_iterable, recursive_map, recursive_map_advanced, round_numeric
 from examples.pybullet.utils.pybullet_tools.utils \
     import Point, Pose, get_sample_fn, LockRenderer, WorldSaver
 from examples.pybullet.utils.pybullet_tools.kuka_primitives \
@@ -116,18 +117,7 @@ def main():
     problem = pddlstream_from_problem(sim=sim, movable=movable)
     _, _, _, stream_map, init, goal = problem
     print('Init:')
-    init_str = "{"
-    for fluent in init:
-        label, *args = fluent
-        args = round_numeric(args)
-        init_str += str((label, *args)) + " "
-        
-        # if is_nonstring_iterable(args):
-        #     init_str += str((label, *args)) + " "
-        # else: 
-        #     init_str += str((label, args)) + " "
-    init_str += "}"
-    print(init_str)
+    print(fmt_fluents(init))
     sys.exit()
                 
 
@@ -150,6 +140,15 @@ def main():
         sim.close()
 
 
+def fmt_fluents(fluents):
+    fn = lambda elem: round(elem,3) if is_numeric(elem) else elem
+    fluent_str = "{"
+    for fluent in fluents:
+        label, *args = fluent
+        args = recursive_map_advanced(fn, args, preserve_iterable_types=False, nonterminal_post_recursion_fn=tuple)
+        fluent_str += str((label, *args)) + " "
+    fluent_str += "}"
+    return fluent_str
 
 ##########################  TEST STREAMS  ############################# 
 

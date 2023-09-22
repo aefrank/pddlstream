@@ -15,7 +15,7 @@ Args: TypeAlias = list
 Kwargs: TypeAlias = Dict[str,Any]
 
 Real : TypeAlias = Union[int,float]
-UniqueID : TypeAlias  = Union[str,int]
+UID : TypeAlias  = Union[str,int]
 
 Position3D = NamedTuple("Position3D", x=Real, y=Real, z=Real)
 Position2D = NamedTuple("Position2D", x=Real, y=Real)
@@ -60,3 +60,23 @@ class ObjectSpec(UserDict):
     @property
     def URDF(self):
         return URDFObjectSpec(**self.urdf_data)
+    
+
+def _as_urdf_spec(spec:Union[str,dict]) -> "URDFObjectSpec":
+    # def _obj_attr_check(spec:dict) -> None:
+    #     '''Ensure all necessary keys present in object dict, and no forbidden keys are present.
+    #     '''
+    #     necessary, forbidden = set(['category']), set(cls._states)
+    #     missing = necessary - set(spec)
+    #     extras = forbidden & set(spec)
+    #     if len(missing)>0:  raise ValueError(f"object specification missing necessary key(s) '{missing}':\n{spec}")
+    #     if len(extras)>0:   raise ValueError(f"object specification contains forbidden key(s) '{extras}':\n{spec}")        
+
+    if isinstance(spec, dict) or isinstance(spec,UserDict):
+        urdf_spec = ObjectSpec(**spec).URDF
+    elif isinstance(spec,str): 
+        urdf_spec = URDFObjectSpec(spec)
+    else:
+        raise TypeError(f"Inappropriate argument 'spec' of type {type(spec)}. Expected str or dict.")
+    assert isinstance(urdf_spec, URDFObjectSpec)
+    return urdf_spec

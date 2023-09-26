@@ -3,8 +3,7 @@
 ########################################################################################################################
 import importlib
 from typing import \
-    Any, Callable, Collection, Dict, NewType, Set, Iterable, List, Optional, Tuple, Type, Union, \
-    get_args
+    Any, Callable, Collection, Dict, NewType, Set, Iterable, List, Optional, Tuple, Type, Union, get_args
 from typing_extensions import TypeAlias
 from enum import Enum
 
@@ -64,24 +63,17 @@ from igibson.external.pybullet_tools.utils import \
 PybulletToolsVersion = Enum('PybulletToolsVersion', ['PDDLSTREAM', 'IGIBSON'])
 STREAM = PybulletToolsVersion.PDDLSTREAM
 IGIBSON = PybulletToolsVersion.IGIBSON
-
-IMPORT_FROM = {
+UTILS = {
     STREAM : 'examples.pybullet.utils',
     IGIBSON : 'igibson.external'
 }
-
-# import .utils as pbtools_ps
-# .utils as pbtools_ig
-
-import examples.pybullet.utils.motion.motion_planners as motion_ps
-import igibson.external.motion.motion_planners as motion_ig
 PYBULLET_TOOLS_MODULES = {
-    STREAM :  importlib.import_module('pybullet_tools', IMPORT_FROM[STREAM]),
-    IGIBSON : importlib.import_module('pybullet_tools', IMPORT_FROM[IGIBSON]),
+    STREAM :  importlib.import_module('.pybullet_tools', UTILS[STREAM]),
+    IGIBSON : importlib.import_module('.pybullet_tools', UTILS[IGIBSON]),
 }
 MOTION_PLANNING_MODULES = {
-    STREAM:   importlib.import_module('motion.motion_planners', IMPORT_FROM[STREAM]),
-    IGIBSON : importlib.import_module('motion.motion_planners', IMPORT_FROM[IGIBSON]),
+    STREAM:   importlib.import_module('.motion.motion_planners', UTILS[STREAM]),
+    IGIBSON : importlib.import_module('.motion.motion_planners', UTILS[IGIBSON]),
 }
 
 ################# Custom types for slightly more "self-documenting" code #######################
@@ -251,7 +243,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     ################################### Initialize Environment #####################################
     # TODO: generalize
     def __init__(self, config_file:str, objects:Collection[ObjectSpec]=[], *, headless:bool=True, verbose=True):
-        self._init_igibson(config_file=config_file, headless=headless)
+        self._init_igibson(config=config_file, headless=headless)
         self.load_objects(objects, verbose=verbose)
         self._init_object_state(objects,verbose=verbose)
         self._init_robot_state()
@@ -289,7 +281,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         config_file = os.path.abspath(config_file)
         config_data = parse_config(config_file)
 
-        # # specific tuning
+        # # don't load default
         # config_data["load_object_categories"] = []  # accelerate loading (only building structures)
         # config_data["visible_target"] = False
         # config_data["visible_path"] = False

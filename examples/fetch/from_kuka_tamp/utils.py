@@ -1,146 +1,14 @@
 
-from typing import Any, Callable, Iterable, List, Optional, ModuleType, Union
-from typing_extensions import TypeAlias
-import os
-from os import PathLike
-import importlib
-from importlib import Resource, Package
-from inspect import ismodule as is_module_object
-import inspect as ins
-
-def is_resource(x:Any) -> bool:
-    isinstance(x,(str,ModuleType))
-Module:TypeAlias = Union[ModuleType,Resource]
-def is_module(x:Any) -> bool:
-    return is_resource(x) or is_module_object(x)
-
+from typing import Any, Callable, Iterable, List, Optional, Union
 import numpy as np
+# from typing_extensions import TypeAlias
+# import os
+# from os import PathLike
+# import importlib
+# from importlib import Resource, Package
+# from inspect import ismodule as is_module_object
+# import inspect as ins
 
-
-
-
-
-# def import_module(*module:List[Resource], package:Optional[Package]=None):
-#     if len(module)==0:
-#         raise ValueError("Must pass at least one 'module'")
-#     return [importlib.import_module(mod, package) for mod in module]
-
-def import_member(member:str, module:Module):
-    if is_resource(module):
-        module = importlib.import_module(module)
-    assert is_module_object(module)
-    return getattr(module, member)
-
-def import_members(module:Module, *members:List[str]):
-    if is_resource(module):
-        module = importlib.import_module(module)
-    assert is_module_object(module)
-    if members:
-        return getattr(module, [mem for mem in members])
-    else: # If empty list, import all members
-        return ins.getmembers(module)
-    
-def get_from(source, *targets:List[str], parent=None):
-    '''Note: will treat string 'source' as the identifier of the source object, not the actual object to query.
-    '''
-    def __member_from_module_name(__module:str, *__member:str):
-        return __import__(__module, fromlist=__member)
-    def __module_from_none(__module:str):
-        return importlib.import_module(__module)
-    def __module_from_package_name(__package:str, __module:str):
-        return importlib.import_module(__module, __package)
-    
-    def __from_module_name(__module:str, *__targets:List[str], __package:Optional[str]=None):
-        if not targets:
-            raise NotImplementedError
-        else:
-            # module = importlib.import_module(__module, __package)
-            # [getattr(module, t) for t in targets]
-            module = importlib.util.resolve_name(__module, __package)
-            return __import__(module, fromlist=targets)
-    
-    if isinstance(source,str): 
-        if parent is None:
-            # source must be the name/path of a module/pkg
-            source = importlib.import_module(source)
-        else:
-            if isinstance(parent, str):
-                # parent must be the name/path of a module/pkg
-                parent = importlib.import_module(parent)
-            # parent is an object
-            source = getattr(parent, source)
-            # now source is an object
-            return get_from(source, *targets)
-    else:
-        if len(targets)==1: # 'source' is an object itself as opposed to a string describing the source
-            return getattr(source, targets[0])
-        else:
-            return [getattr(source, target) for target in targets]
-
-    
-    
-
-
-
-
-
-def _import_from(module:Module, *members:List[str], package:Optional[Package]=None): 
-    '''
-    from module import member           =>          member = import_from("module", "member")   
-    import module;                                    OR          import module; member = import_from(module, "member")
-
-    from module import member as alias  =>          alias = import_from("module", "member") 
-                                        OR          import module; alias = import_from(module, "member") 
-
-    from module import member1, member2 =>          member1, member2 = import_from("module", "member1", "member2")
-    
-    import package.module as module                 => import_from("module", package=package) 
-    import package.module                           => package = import_from(None, package=package)
-
-
-
-        Before execution:
-            variable package may or may not be defined in global scope
-        
-        After execution:
-            variable package is unchanged (will not be defined if was not beforehand)
-            variable <module:ModuleType> defined in global scope, with attributes module.__name__="module" and module.__package__=package.__name__
-    
-    module =       
-    import package; from package import module      import package; import_from("module", package=package)
-                                        
-
-    
-    '''
-    # Type checking
-    ## Several checks happen more than once -- I went more for readability than efficiency
-    # if package is None:
-    #     if is_resource(module):
-    #         module = importlib.import_module(module)
-
-    # assert package is None or is_package(package)
-    # # Check package type, which affects If package is defined, that implies we need to import module from package, so module must be a Resource, not a ModuleType object
-    # assert package is None or (is_package(package) and not is_module_object(module)) 
-        
-
-# def _import(module:Module, package:Optional[Package]=None, members:Iterable[str]=[]):
-#     '''Dynamically import module, or 
-#     '''
-#     assert package is None or is_package(package)
-#     assert is_module(module)
-
-#     if is_resource(module):
-#         module = importlib.import_module(module, package)
-#     if not members:
-#         return module
-#     else:
-#         return [getattr(module, member) for member in members]
-        # return __import__(module, fromlist=members)
-
-
-# def import_from(attr:str, module:Union[Resource,ModuleType], package:Optional[Union[Resource,Package]]=None):
-    
-#     return getattr(import_module(module, package), attr)
 
 
 
@@ -290,3 +158,136 @@ def round_numeric(x:Any, dec:int=3, **kwargs):
 
 
     
+# def is_resource(x:Any) -> bool:
+#     isinstance(x,(str,ModuleType))
+# Module:TypeAlias = Union[ModuleType,Resource]
+# def is_module(x:Any) -> bool:
+#     return is_resource(x) or is_module_object(x)
+
+# import numpy as np
+
+
+
+
+
+# # def import_module(*module:List[Resource], package:Optional[Package]=None):
+# #     if len(module)==0:
+# #         raise ValueError("Must pass at least one 'module'")
+# #     return [importlib.import_module(mod, package) for mod in module]
+
+# def import_member(member:str, module:Module):
+#     if is_resource(module):
+#         module = importlib.import_module(module)
+#     assert is_module_object(module)
+#     return getattr(module, member)
+
+# def import_members(module:Module, *members:List[str]):
+#     if is_resource(module):
+#         module = importlib.import_module(module)
+#     assert is_module_object(module)
+#     if members:
+#         return getattr(module, [mem for mem in members])
+#     else: # If empty list, import all members
+#         return ins.getmembers(module)
+    
+# def get_from(source, *targets:List[str], parent=None):
+#     '''Note: will treat string 'source' as the identifier of the source object, not the actual object to query.
+#     '''
+#     def __member_from_module_name(__module:str, *__member:str):
+#         return __import__(__module, fromlist=__member)
+#     def __module_from_none(__module:str):
+#         return importlib.import_module(__module)
+#     def __module_from_package_name(__package:str, __module:str):
+#         return importlib.import_module(__module, __package)
+    
+#     def __from_module_name(__module:str, *__targets:List[str], __package:Optional[str]=None):
+#         if not targets:
+#             raise NotImplementedError
+#         else:
+#             # module = importlib.import_module(__module, __package)
+#             # [getattr(module, t) for t in targets]
+#             module = importlib.util.resolve_name(__module, __package)
+#             return __import__(module, fromlist=targets)
+    
+#     if isinstance(source,str): 
+#         if parent is None:
+#             # source must be the name/path of a module/pkg
+#             source = importlib.import_module(source)
+#         else:
+#             if isinstance(parent, str):
+#                 # parent must be the name/path of a module/pkg
+#                 parent = importlib.import_module(parent)
+#             # parent is an object
+#             source = getattr(parent, source)
+#             # now source is an object
+#             return get_from(source, *targets)
+#     else:
+#         if len(targets)==1: # 'source' is an object itself as opposed to a string describing the source
+#             return getattr(source, targets[0])
+#         else:
+#             return [getattr(source, target) for target in targets]
+
+    
+    
+
+
+
+
+
+# def _import_from(module:Module, *members:List[str], package:Optional[Package]=None): 
+#     '''
+#     from module import member           =>          member = import_from("module", "member")   
+#     import module;                                    OR          import module; member = import_from(module, "member")
+
+#     from module import member as alias  =>          alias = import_from("module", "member") 
+#                                         OR          import module; alias = import_from(module, "member") 
+
+#     from module import member1, member2 =>          member1, member2 = import_from("module", "member1", "member2")
+    
+#     import package.module as module                 => import_from("module", package=package) 
+#     import package.module                           => package = import_from(None, package=package)
+
+
+
+#         Before execution:
+#             variable package may or may not be defined in global scope
+        
+#         After execution:
+#             variable package is unchanged (will not be defined if was not beforehand)
+#             variable <module:ModuleType> defined in global scope, with attributes module.__name__="module" and module.__package__=package.__name__
+    
+#     module =       
+#     import package; from package import module      import package; import_from("module", package=package)
+                                        
+
+    
+#     '''
+#     # Type checking
+#     ## Several checks happen more than once -- I went more for readability than efficiency
+#     # if package is None:
+#     #     if is_resource(module):
+#     #         module = importlib.import_module(module)
+
+#     # assert package is None or is_package(package)
+#     # # Check package type, which affects If package is defined, that implies we need to import module from package, so module must be a Resource, not a ModuleType object
+#     # assert package is None or (is_package(package) and not is_module_object(module)) 
+        
+
+# # def _import(module:Module, package:Optional[Package]=None, members:Iterable[str]=[]):
+# #     '''Dynamically import module, or 
+# #     '''
+# #     assert package is None or is_package(package)
+# #     assert is_module(module)
+
+# #     if is_resource(module):
+# #         module = importlib.import_module(module, package)
+# #     if not members:
+# #         return module
+# #     else:
+# #         return [getattr(module, member) for member in members]
+#         # return __import__(module, fromlist=members)
+
+
+# # def import_from(attr:str, module:Union[Resource,ModuleType], package:Optional[Union[Resource,Package]]=None):
+    
+# #     return getattr(import_module(module, package), attr)

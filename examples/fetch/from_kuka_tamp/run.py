@@ -8,8 +8,9 @@ import os
 import functools as ft
 import numpy as np
 
-from examples.fetch.from_kuka_tamp.fetch_primitives \
-    import MyiGibsonSemanticInterface, is_nonstring_iterable, is_numeric, nonstring_iterable, recursive_map, recursive_map_advanced, round_numeric
+from examples.fetch.from_kuka_tamp.utils \
+    import is_nonstring_iterable, is_numeric, nonstring_iterable, recursive_map, recursive_map_advanced, round_numeric
+from examples.fetch.from_kuka_tamp.fetch_primitives import MyiGibsonSemanticInterface
 from examples.pybullet.utils.pybullet_tools.utils \
     import Point, Pose, get_sample_fn, LockRenderer, WorldSaver
 from examples.pybullet.utils.pybullet_tools.kuka_primitives \
@@ -49,7 +50,7 @@ def pddlstream_from_problem(sim:MyiGibsonSemanticInterface, movable=[], teleport
         
         for surface in fixed:
             init += [('Stackable', body, surface)]
-            if sim.is_placement(body, surface):
+            if sim.is_on(body, surface):
                 init += [('Supported', body, pose, surface)]
 
     body = movable[0]

@@ -43,7 +43,7 @@ hide_robot: false
 
 # task
 # task: room_rearrangement
-# load_object_categories: [
+load_object_categories: []
 #     dishwasher,
 #     fridge,
 #     microwave,

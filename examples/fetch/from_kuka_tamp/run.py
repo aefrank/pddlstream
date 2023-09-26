@@ -119,7 +119,6 @@ def main():
     _, _, _, stream_map, init, goal = problem
     print('Init:')
     print(fmt_fluents(init))
-    sys.exit()
                 
 
     print('Goal:', goal)

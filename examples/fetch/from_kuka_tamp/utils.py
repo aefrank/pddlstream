@@ -1,15 +1,40 @@
 
+from enum import Enum
 from typing import Any, Callable, Iterable, List, Optional, Union
 import numpy as np
 # from typing_extensions import TypeAlias
 # import os
 # from os import PathLike
-# import importlib
-# from importlib import Resource, Package
+import importlib
+from importlib import Resource, Package
 # from inspect import ismodule as is_module_object
 # import inspect as ins
 
 
+PybulletToolsVersion = Enum('PybulletToolsVersion', ['PDDLSTREAM', 'IGIBSON'])
+STREAM = PybulletToolsVersion.PDDLSTREAM
+IGIBSON = PybulletToolsVersion.IGIBSON
+UTILS = {
+    STREAM : 'examples.pybullet.utils',
+    IGIBSON : 'igibson.external'
+}
+def import_module(module, package=None):
+    if module=='motion':
+        module = 'motion.motion_planners'
+    elif module=='pybullet_tools':
+        module = 'pybullet_tools'
+    
+    if package is not None:
+        if not module.startswith("."):
+            module = "." + module
+        if isinstance(package, str):
+            package = PybulletToolsVersion(package)
+        if package==STREAM:
+            package = 'examples.pybullet.utils'
+        elif package==UTILS:
+            package = 'igibson.external'
+
+    return importlib.import_module(module, package)
 
 
 

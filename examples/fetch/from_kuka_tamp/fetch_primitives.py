@@ -42,7 +42,7 @@ from igibson.utils.behavior_robot_motion_planning_utils import HAND_MAX_DISTANCE
 from .object_spec import \
     ObjectSpec, Orientation, Position, _as_urdf_spec
 from examples.fetch.from_kuka_tamp.utils import \
-    is_numeric_vector, nonstring_iterable, recursive_map_advanced, round_numeric
+    is_numeric_vector, nonstring_iterable, recursive_map_advanced, round_numeric, PybulletToolsVersion, import_module
 
 
 # PYBULLET TOOLS 
@@ -58,23 +58,27 @@ from igibson.external.pybullet_tools.utils import \
 
 ###################   Disambiguating different versions of utils   #########################
 # Pybullet Planning implementation: original by Caelan Reed Garrett vs. iGibson version 
-# TODO: Incorporate other possibly-ambiguous functions 
+# TODO: Incorporate other possibly-ambiguous modules 
+VERSION = PybulletToolsVersion.PDDLSTREAM
 
-PybulletToolsVersion = Enum('PybulletToolsVersion', ['PDDLSTREAM', 'IGIBSON'])
-STREAM = PybulletToolsVersion.PDDLSTREAM
-IGIBSON = PybulletToolsVersion.IGIBSON
-UTILS = {
-    STREAM : 'examples.pybullet.utils',
-    IGIBSON : 'igibson.external'
-}
-PYBULLET_TOOLS_MODULES = {
-    STREAM :  importlib.import_module('.pybullet_tools', UTILS[STREAM]),
-    IGIBSON : importlib.import_module('.pybullet_tools', UTILS[IGIBSON]),
-}
-MOTION_PLANNING_MODULES = {
-    STREAM:   importlib.import_module('.motion.motion_planners', UTILS[STREAM]),
-    IGIBSON : importlib.import_module('.motion.motion_planners', UTILS[IGIBSON]),
-}
+pybullet_tools = import_module("pybullet_tools", VERSION)
+motion = import_module("motion", VERSION)
+
+# PybulletToolsVersion = Enum('PybulletToolsVersion', ['PDDLSTREAM', 'IGIBSON'])
+# STREAM = PybulletToolsVersion.PDDLSTREAM
+# IGIBSON = PybulletToolsVersion.IGIBSON
+# UTILS = {
+#     STREAM : 'examples.pybullet.utils',
+#     IGIBSON : 'igibson.external'
+# }
+# PYBULLET_TOOLS_MODULES = {
+#     STREAM :  importlib.import_module('.pybullet_tools', UTILS[STREAM]),
+#     IGIBSON : importlib.import_module('.pybullet_tools', UTILS[IGIBSON]),
+# }
+# MOTION_PLANNING_MODULES = {
+#     STREAM:   importlib.import_module('.motion.motion_planners', UTILS[STREAM]),
+#     IGIBSON : importlib.import_module('.motion.motion_planners', UTILS[IGIBSON]),
+# }
 
 ################# Custom types for slightly more "self-documenting" code #######################
 # T = TypeVar('T')
@@ -851,9 +855,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         
         assert len(self._arm_joint_ids) == len(q1) and len(self._arm_joint_ids) == len(q2)
 
-        pbtools_module = PYBULLET_TOOLS_MODULES[planning_utils_version]
         distance_fn, sample_fn, extend_fn, collision_fn = self._get_arm_joint_motion_helper_fns(
-            pbtools_module=pbtools_module, 
             obstacles=obstacles,
             ignore_other_scene_obstacles=ignore_other_scene_obstacles,
             attachments=attachments,
@@ -864,11 +866,10 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         )
         
         with UndoableContext(self._robot):
-            if not pbtools_module.check_initial_end(q1, q2, collision_fn):
+            if not pybullet_tools.check_initial_end(q1, q2, collision_fn):
                 return None
             
-            motion_module = MOTION_PLANNING_MODULES[planning_utils_version]
-            mp_algo_fn = self._get_motion_planning_algorithm(motion_module, algorithm)
+            mp_algo_fn = self._get_motion_planning_algorithm(algorithm)
             if algorithm == 'direct':
                 return mp_algo_fn(q1, q2, extend_fn, collision_fn)
             elif algorithm == 'birrt':
@@ -882,23 +883,22 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             else:
                 return None
     
-    def _get_motion_planning_algorithm(self, motion_module, algorithm):
+    def _get_motion_planning_algorithm(self, algorithm):
         if algorithm == 'direct':
-            return motion_module.rrt_connect.direct_path
+            return motion.rrt_connect.direct_path
         elif algorithm == 'birrt':
-            return motion_module.rrt_connect.birrt 
+            return motion.rrt_connect.birrt 
         elif algorithm == 'rrt_star':
-            return motion_module.rrt_star.rrt_star 
+            return motion.rrt_star.rrt_star 
         elif algorithm == 'rrt':
-            return motion_module.rrt.rrt
+            return motion.rrt.rrt
         elif algorithm == 'lazy_prm':
-            return motion_module.lazy_prm.lazy_prm_replan_loop 
+            return motion.lazy_prm.lazy_prm_replan_loop 
         else:
             raise ValueError(f"Inappropriate argument algorithm={algorithm}. Expected one of: 'direct', 'birrt', 'rrt_star', 'rrt', or 'lazy_prm'")
 
 
     def _get_arm_joint_motion_helper_fns(self, 
-        pbtools_module,
         obstacles=[],
         attachments=[], 
         self_collisions=True, 
@@ -928,31 +928,26 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             ignore_other_scene_obstacles=ignore_other_scene_obstacles
         )
 
-        if pbtools_module==PYBULLET_TOOLS_MODULES[PybulletToolsVersion.PDDLSTREAM]:
+        distance_fn = pybullet_tools.get_distance_fn(robot_id, joint_ids, weights=weights)
+        sample_fn = pybullet_tools.get_sample_fn(robot_id, joint_ids)
+        extend_fn = pybullet_tools.get_extend_fn(robot_id, joint_ids, resolutions=resolutions)
+        
+        assert isinstance(VERSION, PybulletToolsVersion)
+        if VERSION==PybulletToolsVersion.PDDLSTREAM:
             if (weights is None) and (resolutions is not None):
                 weights = np.reciprocal(resolutions)
-            distance_fn = pbtools_module.get_distance_fn(robot_id, joint_ids, weights=weights)
-            sample_fn = pbtools_module.get_sample_fn(robot_id, joint_ids)
-            extend_fn = pbtools_module.get_extend_fn(robot_id, joint_ids, resolutions=resolutions)
-            collision_fn = pbtools_module.get_collision_fn(
+            collision_fn = pybullet_tools.get_collision_fn(
                 body=robot_id, joints=joint_ids, obstacles=obstacles, attachments=attachments, 
                 self_collisions=self_collisions, disabled_collisions=disabled_collisions,
                 use_aabb=use_aabb, cache=cache
             )
-        elif pbtools_module==PYBULLET_TOOLS_MODULES[PybulletToolsVersion.IGIBSON]:
-            distance_fn = pbtools_module.get_distance_fn(robot_id, joint_ids, weights=weights)
-            sample_fn = pbtools_module.get_sample_fn(robot_id, joint_ids)
-            extend_fn = pbtools_module.get_extend_fn(robot_id, joint_ids, resolutions=resolutions)
-            collision_fn = pbtools_module.get_collision_fn(
+        elif VERSION==PybulletToolsVersion.IGIBSON:
+            collision_fn = pybullet_tools.get_collision_fn(
                 body=robot_id, joints=joint_ids, obstacles=obstacles, attachments=attachments, 
                 self_collisions=self_collisions, disabled_collisions=disabled_collisions,
                 allow_collision_links=allow_collision_links
             )
-        else:
-            raise ValueError(
-                f"Inappropriate argument pbtools_module={pbtools_module} of type {type(pbtools_module)}. Expected either " 
-                f"{PYBULLET_TOOLS_MODULES[PybulletToolsVersion.PDDLSTREAM]} or {PYBULLET_TOOLS_MODULES[PybulletToolsVersion.IGIBSON]}"
-            )
+
         return distance_fn, sample_fn, extend_fn, collision_fn
 
 

@@ -8,20 +8,31 @@ import os
 import functools as ft
 import numpy as np
 
-from examples.fetch.from_kuka_tamp.utils \
-    import is_nonstring_iterable, is_numeric, nonstring_iterable, recursive_map, recursive_map_advanced, round_numeric
-from examples.fetch.from_kuka_tamp.fetch_primitives import MyiGibsonSemanticInterface
-from examples.pybullet.utils.pybullet_tools.utils \
-    import Point, Pose, get_sample_fn, LockRenderer, WorldSaver
-from examples.pybullet.utils.pybullet_tools.kuka_primitives \
-    import Attach, BodyPath, Command
-from pddlstream.algorithms.meta import solve
+### PDDLStream-specific imports
+from pddlstream.algorithms.meta import ALGORITHMS, create_parser, solve
 from pddlstream.utils \
     import INF, Profiler, negate_test, read, str_from_object
 from pddlstream.language.constants \
     import PDDLProblem, print_solution
 from pddlstream.language.generator \
     import from_fn, from_gen_fn, from_test
+
+# Custom imports
+from examples.fetch.from_kuka_tamp.utils \
+    import UTILS, PybulletToolsVersion, import_from, import_module, is_nonstring_iterable, is_numeric, nonstring_iterable, recursive_map, recursive_map_advanced, round_numeric
+from examples.fetch.from_kuka_tamp.fetch_primitives import LockRenderer, MyiGibsonSemanticInterface
+
+# Imports that have two different implementations
+VERSION = PybulletToolsVersion.IGIBSON
+
+pybullet_tools = import_module("pybullet_tools", UTILS[VERSION])
+motion = import_module("motion", UTILS[VERSION])
+Point, Pose, get_sample_fn, WorldSaver = \
+    import_from("utils", targets=["Point", "Pose", "get_sample_fn", "WorldSaver"], package=pybullet_tools)
+
+Attach, BodyPath, Command = \
+    import_from("kuka_primitives", targets=["Attach", "BodyPath", "Command"], package=pybullet_tools)
+
 
 #######################################################
 
@@ -92,8 +103,8 @@ def pddlstream_from_problem(sim:MyiGibsonSemanticInterface, movable=[], teleport
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-g','--gui', action='store_true', help='Simulates the system')
+    parser = create_parser()
+    parser.add_argument('-g','--gui', action='store_true', help='Render and visualize the system')
     args = parser.parse_args()
 
     dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -126,7 +137,7 @@ def main():
 
     try:
         with Profiler():
-            with LockRenderer(lock=True): # disable rendering during object loading
+            with LockRenderer(sim, lock=True): # disable rendering during object loading
                 solution = solve(
                     problem, 
                     algorithm=args.algorithm, 

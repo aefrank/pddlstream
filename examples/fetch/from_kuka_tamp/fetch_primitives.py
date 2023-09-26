@@ -11,6 +11,7 @@ import functools as ft
 import os, sys, math
 from itertools import product
 import argparse
+from igibson.simulator import SimulatorMode
 
 import pybullet as pb
 import numpy as np
@@ -50,7 +51,7 @@ from examples.fetch.from_kuka_tamp.utils import \
 from examples.pybullet.utils.pybullet_tools.kuka_primitives import \
     Attach, BodyConf, BodyGrasp, BodyPath, BodyPose, Command
 from examples.pybullet.utils.pybullet_tools.utils import \
-    Attachment, get_client, get_joint_positions, get_sample_fn, interpolate_poses, quat_from_euler
+    Attachment, Saver, get_client, get_joint_positions, get_sample_fn, interpolate_poses, quat_from_euler
 from igibson.external.pybullet_tools.utils import \
     all_between, get_aabb, get_custom_limits, get_moving_links, get_self_link_pairs, is_collision_free, link_from_name, \
     pairwise_collision, pairwise_link_collision, set_joint_positions
@@ -1307,6 +1308,25 @@ def main():
 
 
 
+
+class LockRenderer(Saver):
+    # disabling rendering temporary makes adding objects faster
+    def __init__(self, ig:MyiGibsonSemanticInterface, lock:bool=True):
+        HEADLESS_MODES = SimulatorMode.GUI_INTERACTIVE, SimulatorMode.GUI_NON_INTERACTIVE
+        self.ig = ig
+        self.client = ig.env.simulator.cid
+        self.headless = not ig.env.simulator.mode in HEADLESS_MODES
+        # skip if the visualizer isn't active
+        if not self.headless:
+            self.state = not lock
+            pybullet_tools.utils.set_renderer(enable=self.state)
+            
+
+    def restore(self):
+        if not self.headless:
+            assert self.state is not None
+            if self.state != pybullet_tools.utils.CLIENTS[self.client]:
+                pybullet_tools.utils.set_renderer(enable=self.state)
 
 
 

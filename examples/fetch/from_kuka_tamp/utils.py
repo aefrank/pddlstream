@@ -6,10 +6,8 @@ import numpy as np
 # import os
 # from os import PathLike
 import importlib
-from importlib import Resource, Package
 # from inspect import ismodule as is_module_object
-# import inspect as ins
-
+import inspect as ins
 
 PybulletToolsVersion = Enum('PybulletToolsVersion', ['PDDLSTREAM', 'IGIBSON'])
 STREAM = PybulletToolsVersion.PDDLSTREAM
@@ -18,21 +16,58 @@ UTILS = {
     STREAM : 'examples.pybullet.utils',
     IGIBSON : 'igibson.external'
 }
+
+def import_from(module, targets=[], package=None):
+    if not targets:
+        return tuple()
+    def import_targets_from_object(module, *targets):
+        targets = tuple(getattr(module,target) for target in targets)
+        return targets if len(targets)>1 else targets[0]
+    def import_module_with_targets(module_name, *targets, package=None):
+        if package is not None:
+            if ins.ismodule(package):
+                if hasattr(package, module_name):
+                    return getattr(package, module_name)
+                else:
+                    package = package.__name__
+            assert isinstance(package,str)
+            if not module_name.startswith("."):
+                module_name = "." + module_name
+            module_name = package + module_name
+        assert isinstance(module_name,str)
+        return __import__(module_name, fromlist=targets) # this "should" make sure the targets are loaded
+
+    if ins.ismodule(module):
+        try:
+            return import_targets_from_object(module, *targets)
+        except Exception:
+            # re-import module
+            module = module.__name__
+    assert isinstance(module,str)
+    module = import_module_with_targets(module, *targets, package=package)
+    return import_targets_from_object(module, *targets)
+
+
+    
+
+
 def import_module(module, package=None):
     if module=='motion':
         module = 'motion.motion_planners'
     elif module=='pybullet_tools':
         module = 'pybullet_tools'
-    
+
+    if ins.ismodule(package):
+        if hasattr(package,module):
+            return getattr(package,module)
+        else:
+            package = package.__name__
+        
     if package is not None:
         if not module.startswith("."):
             module = "." + module
-        if isinstance(package, str):
-            package = PybulletToolsVersion(package)
-        if package==STREAM:
-            package = 'examples.pybullet.utils'
-        elif package==UTILS:
-            package = 'igibson.external'
+        if isinstance(package, PybulletToolsVersion):
+            package = UTILS[package]
 
     return importlib.import_module(module, package)
 

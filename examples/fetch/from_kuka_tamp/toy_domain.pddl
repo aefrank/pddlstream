@@ -1,0 +1,21 @@
+(define (domain fetch-basic)
+    (:requirements :strips :equality :negative-preconditions)
+    (:predicates
+        (Any ?x)
+        (Conf ?q)
+        (Path ?p)
+        (AtConf ?q)
+        (CollisionFree ?p)
+    )
+
+    (:action move
+        :parameters (?q1 ?q2 ?p)
+        :precondition   (and (Conf ?q1) (AtConf ?q1)
+                             (Conf ?q2) (not (AtConf ?q2))
+                             (Path ?p) (CollisionFree ?p)
+                        )
+        :effect (and (AtConf ?q2)
+                     (not (AtConf ?q1))
+                )
+    )
+)

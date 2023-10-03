@@ -1,7 +1,6 @@
 ########################################################################################################################
 ##########################################    IMPORTS    ###############################################################
 ########################################################################################################################
-import importlib
 from typing import \
     Any, Callable, Collection, Dict, NewType, Set, Iterable, List, Optional, Tuple, Type, Union, get_args
 from typing_extensions import TypeAlias
@@ -11,7 +10,7 @@ import functools as ft
 import os, sys, math
 from itertools import product
 import argparse
-from igibson.simulator import SimulatorMode
+
 
 import pybullet as pb
 import numpy as np
@@ -23,6 +22,7 @@ from igibson.action_primitives.action_primitive_set_base import ActionPrimitiveE
 from igibson.action_primitives.starter_semantic_action_primitives import \
     UndoableContext, GRASP_APPROACH_DISTANCE, MAX_ATTEMPTS_FOR_SAMPLING_POSE_WITH_OBJECT_AND_PREDICATE, PREDICATE_SAMPLING_Z_OFFSET
 from igibson import object_states
+from igibson.simulator import SimulatorMode
 
 from igibson.envs.igibson_env import iGibsonEnv
 from igibson.utils.motion_planning_wrapper import MotionPlanningWrapper
@@ -40,10 +40,10 @@ from igibson.utils.behavior_robot_motion_planning_utils import HAND_MAX_DISTANCE
 
 
 # Custom modules
-from .object_spec import \
+from utils.object_spec import \
     ObjectSpec, Orientation, Position, _as_urdf_spec
-from examples.fetch.from_kuka_tamp.utils import \
-    is_numeric_vector, nonstring_iterable, recursive_map_advanced, round_numeric, PybulletToolsVersion, import_module
+from examples.fetch.from_kuka_tamp.utils.utils import \
+    import_from, is_numeric_vector, nonstring_iterable, recursive_map_advanced, round_numeric, PybulletToolsVersion, import_module
 
 
 # PYBULLET TOOLS 
@@ -61,7 +61,6 @@ from igibson.external.pybullet_tools.utils import \
 # Pybullet Planning implementation: original by Caelan Reed Garrett vs. iGibson version 
 # TODO: Incorporate other possibly-ambiguous modules 
 VERSION = PybulletToolsVersion.PDDLSTREAM
-
 pybullet_tools = import_module("pybullet_tools", VERSION)
 motion = import_module("motion", VERSION)
 
@@ -218,6 +217,10 @@ class iGibsonSemanticInterface:
 
 class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
+    @property
+    def _pbclient(self):
+        return self.env.simulator.cid
+
     ################################ Basic data/component access ################################
     @property
     def _robot(self) -> BaseRobot:
@@ -230,7 +233,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             f"attribute 'robot' undefined for multi-robot {self.__class__.__name__} containing robots: {self.robots}. "
         return self.robots[0]
     @property 
-    def robot_id(self) -> int:
+    def robot_bid(self) -> int:
         return self.get_bid(self._robot)
     @property
     def _eef(self) -> RobotLink:
@@ -286,10 +289,10 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         config_file = os.path.abspath(config_file)
         config_data = parse_config(config_file)
 
-        # # don't load default
-        # config_data["load_object_categories"] = []  # accelerate loading (only building structures)
-        # config_data["visible_target"] = False
-        # config_data["visible_path"] = False
+        # don't load default furniture, etc.
+        config_data["load_object_categories"] = []  # accelerate loading (only building structures)
+        config_data["visible_target"] = False
+        config_data["visible_path"] = False
 
         # Reduce texture scale for Mac.
         if sys.platform == "darwin":    config_data["texture_scale"] = 0.5
@@ -414,13 +417,13 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         In addition, if pybullet.getLinkState is called with computeLinkVelocity=1, there will be two additional return values:
           worldLinkLinearVelocity:Tuple[float,float,float], worldLinkAngularVelocity:Tuple[float,float,float]
           '''
-        pos, orn, _, _, _, _ = pb.getLinkState(self.robot_id, self.eef_link, computeForwardKinematics=True, physicsClientId=get_client())
+        pos, orn, _, _, _, _ = pb.getLinkState(self.robot_bid, self.eef_link, computeForwardKinematics=True, physicsClientId=get_client())
         return (pos, orn)
     
     def get_arm_config(self) -> JointPos:
-        return self.get_joint_positions(self.robot_id, self._arm_joint_ids)
+        return self.get_joint_positions(self.robot_bid, self._arm_joint_ids)
     def set_arm_config(self, q:JointPos, attachments:List[Attachment]=[]) -> None:
-        self.set_joint_positions(self.robot_id, self._arm_joint_ids, q)
+        self.set_joint_positions(self.robot_bid, self._arm_joint_ids, q)
 
     # ----------------------------------------------------------------------
     
@@ -430,7 +433,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
     def is_on(self, body:UID, surface:UID):
         body    = self.get_object(body)
-        surface = self.get_object(body)
+        surface = self.get_object(surface)
         return body.states[object_states.OnTop].get_value(surface)
     
     ################################################################################
@@ -467,18 +470,17 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                                      link_b_list=body2_links
                                     )
         
-    def sample_arm_config(self, collisions=True, max_attempts=100):
+    def sample_arm_config(self, collisions=True, max_attempts=1000):
         robot = self._robot
-        robot_id = self.robot_id
+        robot_bid = self.robot_bid
         joint_ids = self._arm_joint_ids
-        sample_fn = get_sample_fn(robot_id, joint_ids)
+        sample_fn = get_sample_fn(robot_bid, joint_ids)
+        collision_fn = self._get_robot_arm_collision_fn()
         with UndoableContext(robot):
             config = sample_fn()
             if collisions:
                 for _ in range(max_attempts):
-                    self.set_arm_config(config)
-                    obstacles = self.get_collidable_body_ids(include_robot=True)
-                    if not any(pairwise_collision(robot_id, obs) for obs in obstacles):
+                    if not collision_fn(config):
                         return config
                 return None
             else:
@@ -573,7 +575,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         '''Assuming one Fetch robot so we can use MotionPlanningWrapper functionality
         '''
         robot     = self._robot
-        robot_id  = self.robot_id
+        robot_bid  = self.robot_bid
         joint_ids = self._arm_joint_ids
         if not ignore_other_scene_obstacles:
             obstacles = list(set(obstacles) | set(self._motion_planner.mp_obstacles))
@@ -582,11 +584,11 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         if robot.model_name == "Fetch":
             # iGibson motion_planning_wrapper processing for Fetch
             fetch_disabled_collisions = [
-                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "torso_fixed_link")),
-                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "shoulder_lift_link")),
-                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "upperarm_roll_link")),
-                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "forearm_roll_link")),
-                (link_from_name(robot_id, "torso_lift_link"), link_from_name(robot_id, "elbow_flex_link")),
+                (link_from_name(robot_bid, "torso_lift_link"), link_from_name(robot_bid, "torso_fixed_link")),
+                (link_from_name(robot_bid, "torso_lift_link"), link_from_name(robot_bid, "shoulder_lift_link")),
+                (link_from_name(robot_bid, "torso_lift_link"), link_from_name(robot_bid, "upperarm_roll_link")),
+                (link_from_name(robot_bid, "torso_lift_link"), link_from_name(robot_bid, "forearm_roll_link")),
+                (link_from_name(robot_bid, "torso_lift_link"), link_from_name(robot_bid, "elbow_flex_link")),
             ]
             disabled_collisions += [collision for collision in fetch_disabled_collisions if collision not in disabled_collisions]
             
@@ -598,16 +600,16 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
         
         # Pair of links within the robot that need to be checked for self-collisions
-        self_collision_id_pairs = get_self_link_pairs(robot_id, joint_ids, disabled_collisions) if self_collisions else []
+        self_collision_id_pairs = get_self_link_pairs(robot_bid, joint_ids, disabled_collisions) if self_collisions else []
 
         # List of links that move on the robot and that should be checked for collisions with the obstacles
-        moving_links = frozenset([item for item in get_moving_links(robot_id, joint_ids) if not item in allow_collision_links])
-        moving_robot_ids = [(robot_id, moving_links)]
+        moving_links = frozenset([item for item in get_moving_links(robot_bid, joint_ids) if not item in allow_collision_links])
+        moving_robot_bids = [(robot_bid, moving_links)]
         
         # Joint limits
-        lower_limits, upper_limits = get_custom_limits(robot_id, joint_ids)
+        lower_limits, upper_limits = get_custom_limits(robot_bid, joint_ids)
 
-        return robot, robot_id, joint_ids, obstacles, disabled_collisions, self_collision_id_pairs, moving_robot_ids, lower_limits, upper_limits
+        return robot, robot_bid, joint_ids, obstacles, disabled_collisions, self_collision_id_pairs, moving_robot_bids, lower_limits, upper_limits
     
     
     
@@ -621,7 +623,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             # In addition, if pybullet.getLinkState is called with computeLinkVelocity=1, there will be two additional return values:
             #   worldLinkLinearVelocity:Tuple[float,float,float], worldLinkAngularVelocity:Tuple[float,float,float]
             self.set_arm_config(q)
-            pos, orn, _, _, _, _ = pb.getLinkState(self.robot_id, self.eef_link, computeForwardKinematics=True, physicsClientId=get_client())
+            pos, orn, _, _, _, _ = pb.getLinkState(self.robot_bid, self.eef_link, computeForwardKinematics=True, physicsClientId=get_client())
             return (pos, orn)
 
     def arm_ik(self, eef_position:Position, eef_orientation:Optional[Orientation]=None, use_nullspace:bool=True, **kwargs) -> Optional[JointPos]:
@@ -634,7 +636,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         # ik_solver = pb.IK_DLS or pb.IK_SDLS
         ik_spec =  {
             # robot/eef body IDs
-            'bodyUniqueId' : self.robot_id, 
+            'bodyUniqueId' : self.robot_bid, 
             'endEffectorLinkIndex' : self.eef_link, 
             # workspace target
             'targetPosition' : eef_position, 
@@ -675,11 +677,11 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     def as_arm_config(self, kc:KinematicConstraint, disabled_types:Collection[KinematicConstraint]={}):
         disabled = lambda T: T in disabled_types
         if not disabled(BodyConf) and self._is_kinematic_constraint(kc,BodyConf):
-            assert (kc.body == self.robot_id),    f"BodyConf {kc} field 'body' does not match body ID of {self.robot}."
+            assert (kc.body == self.robot_bid),    f"BodyConf {kc} field 'body' does not match body ID of {self.robot}."
             assert (kc.joints == self._arm_joint_ids), f"BodyConf {kc} field 'joints' does not match arm joint IDs of {self.robot}."
             q = kc.configuration
         elif not disabled(BodyPose) and self._is_kinematic_constraint(kc,BodyPose):
-            assert (kc.body==self.robot_id) or (kc.body==self.eef_link) 
+            assert (kc.body==self.robot_bid) or (kc.body==self.eef_link) 
             q = self.arm_ik(*kc.pose)
         elif not disabled(Pose) and self._is_kinematic_constraint(kc,Pose):
             q = self.arm_ik(*kc)
@@ -729,12 +731,12 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         '''
         ( 
             robot,
-            robot_id, 
+            robot_bid, 
             joint_ids, 
             obstacles, 
             disabled_collisions, 
             self_collision_id_pairs, 
-            moving_robot_ids, 
+            moving_robot_bids, 
             lower_limits, 
             upper_limits 
         ) \
@@ -766,12 +768,12 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
                 # Check for self collisions
                 for link1, link2 in iter(self_collision_id_pairs):
-                    if pairwise_link_collision(robot_id, link1, robot_id, link2):
+                    if pairwise_link_collision(robot_bid, link1, robot_bid, link2):
                         return True
                 
                 # Include attachments as "moving bodies" to be tested for collisions
                 attached_bodies = [attachment.child for attachment in attachments]
-                moving_body_ids = moving_robot_ids + attached_bodies
+                moving_body_ids = moving_robot_bids + attached_bodies
 
                 # Check for collisions of the moving bodies and the obstacles
                 for moving, obs in product(moving_body_ids, obstacles):
@@ -839,7 +841,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     def plan_arm_joint_motion(self, 
         q1:JointPos, 
         q2:JointPos, 
-        obstacles:List[int],
+        obstacles:List[int]=[],
         attachments:List[Attachment]=[],
         weights:Optional[Iterable[float]]=None, 
         resolutions:Optional[Iterable[float]]=None, 
@@ -867,7 +869,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         )
         
         with UndoableContext(self._robot):
-            if not pybullet_tools.check_initial_end(q1, q2, collision_fn):
+            if not pybullet_tools.utils.check_initial_end(q1, q2, collision_fn):
                 return None
             
             mp_algo_fn = self._get_motion_planning_algorithm(algorithm)
@@ -886,15 +888,15 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     
     def _get_motion_planning_algorithm(self, algorithm):
         if algorithm == 'direct':
-            return motion.rrt_connect.direct_path
+            return import_from('rrt_connect', targets=['direct_path'], package=motion) 
         elif algorithm == 'birrt':
-            return motion.rrt_connect.birrt 
+            return import_from('rrt_connect', targets=['birrt'], package=motion) 
         elif algorithm == 'rrt_star':
-            return motion.rrt_star.rrt_star 
+            return import_from('rrt_star', targets=['rrt_star'], package=motion) 
         elif algorithm == 'rrt':
-            return motion.rrt.rrt
+            return import_from('rrt', targets=['rrt'], package=motion) 
         elif algorithm == 'lazy_prm':
-            return motion.lazy_prm.lazy_prm_replan_loop 
+            return import_from('lazy_prm', targets=['lazy_prm_replan_loop'], package=motion) 
         else:
             raise ValueError(f"Inappropriate argument algorithm={algorithm}. Expected one of: 'direct', 'birrt', 'rrt_star', 'rrt', or 'lazy_prm'")
 
@@ -914,7 +916,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     ):
         ( 
             _,
-            robot_id, 
+            robot_bid, 
             joint_ids, 
             obstacles, 
             disabled_collisions, 
@@ -929,22 +931,22 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             ignore_other_scene_obstacles=ignore_other_scene_obstacles
         )
 
-        distance_fn = pybullet_tools.get_distance_fn(robot_id, joint_ids, weights=weights)
-        sample_fn = pybullet_tools.get_sample_fn(robot_id, joint_ids)
-        extend_fn = pybullet_tools.get_extend_fn(robot_id, joint_ids, resolutions=resolutions)
+        distance_fn = pybullet_tools.utils.get_distance_fn(robot_bid, joint_ids, weights=weights)
+        sample_fn = pybullet_tools.utils.get_sample_fn(robot_bid, joint_ids)
+        extend_fn = pybullet_tools.utils.get_extend_fn(robot_bid, joint_ids, resolutions=resolutions)
         
         assert isinstance(VERSION, PybulletToolsVersion)
         if VERSION==PybulletToolsVersion.PDDLSTREAM:
             if (weights is None) and (resolutions is not None):
                 weights = np.reciprocal(resolutions)
-            collision_fn = pybullet_tools.get_collision_fn(
-                body=robot_id, joints=joint_ids, obstacles=obstacles, attachments=attachments, 
+            collision_fn = pybullet_tools.utils.get_collision_fn(
+                body=robot_bid, joints=joint_ids, obstacles=obstacles, attachments=attachments, 
                 self_collisions=self_collisions, disabled_collisions=disabled_collisions,
                 use_aabb=use_aabb, cache=cache
             )
         elif VERSION==PybulletToolsVersion.IGIBSON:
-            collision_fn = pybullet_tools.get_collision_fn(
-                body=robot_id, joints=joint_ids, obstacles=obstacles, attachments=attachments, 
+            collision_fn = pybullet_tools.utils.get_collision_fn(
+                body=robot_bid, joints=joint_ids, obstacles=obstacles, attachments=attachments, 
                 self_collisions=self_collisions, disabled_collisions=disabled_collisions,
                 allow_collision_links=allow_collision_links
             )
@@ -981,7 +983,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                     body=self.get_bid(target_obj), 
                     grasp_pose=grasp_pose,
                     approach_pose=approach_pose,
-                    robot=self.robot_id,
+                    robot=self.robot_bid,
                     link=self.eef_link
                 )
                 yield (body_grasp,)
@@ -1043,7 +1045,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
                 # Some sanity checks
                 assert isinstance(grasp, BodyGrasp), f"grasp must be defined as a BodyGrasp object, not {type(grasp)}"
-                assert grasp.robot == self.robot_id, f"grasp must be defined for robot body ID {self.robot_id}, not {grasp.robot}" 
+                assert grasp.robot == self.robot_bid, f"grasp must be defined for robot body ID {self.robot_bid}, not {grasp.robot}" 
                 assert grasp.link == self.eef_link, f"grasp must be defined for eef body ID {self.eef_link}, not {grasp.link}" 
                 assert grasp.body == target_bid, f"grasp must be defined for object body ID {target_bid}, not {grasp.body}"
 
@@ -1059,9 +1061,9 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                     path = self._motion_planner.plan_arm_motion(arm_joint_positions=grasp_config)
                     if path is not None:
                         # Starting at approach config, move to grasp config, perform grasp, and return to approach config
-                        command = Command([ BodyPath(self.robot_id, path),
-                                            Attach(target_bid, self.robot_id, self.eef_link),
-                                            BodyPath(self.robot_id, path[::-1], attachments=[grasp])])
+                        command = Command([ BodyPath(self.robot_bid, path),
+                                            Attach(target_bid, self.robot_bid, self.eef_link),
+                                            BodyPath(self.robot_bid, path[::-1], attachments=[grasp])])
                         return (approach_config, command)
         return calculate_grasp_command
 
@@ -1107,7 +1109,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
     def get_free_motion_gen(self):
         robot = self._robot
-        robot_id = self.robot_id
+        robot_bid = self.robot_bid
         joint_ids = self._arm_joint_ids
         def qfree_traj(q1:JointPos, q2:JointPos, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
             with UndoableContext(robot):
@@ -1122,16 +1124,16 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 self._motion_planner.mp_obstacles = original_mp_obstacles
                 # Return value
                 if path is not None:
-                    command = Command([BodyPath(robot_id, path, joints=joint_ids)]) if path is not None else None
+                    command = Command([BodyPath(robot_bid, path, joints=joint_ids)]) if path is not None else None
                     return (command,)
                 else:
                     return tuple()
 
         def _consistency_check(q:KinematicConstraint) -> None:
             if isinstance(q,BodyConf):
-                assert (q.body == robot_id) and (q.joints == joint_ids)
+                assert (q.body == robot_bid) and (q.joints == joint_ids)
             elif isinstance(q, BodyPose):
-                assert (q.body == robot_id)
+                assert (q.body == robot_bid)
 
         ft.wraps(qfree_traj)
         def wrapper(q1:KinematicConstraint, q2:KinematicConstraint, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
@@ -1144,23 +1146,23 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
 
     def get_motion_gen(self):
-        robot_id = self._motion_planner.robot_id
+        robot_bid = self.robot_bid
         joint_ids = self._arm_joint_ids
         def qfree_traj(q1:JointPos, q2:JointPos, grasp:BodyGrasp=None, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
             obstacles = set(self.get_collidable_body_ids()) | self.assign_poses(atpose_fluents)
             path = self.plan_arm_joint_motion(q1=q1, q2=q2, obstacles=obstacles, attachments=[grasp.attachment()])
             print(f"Path: {path}")
             if path is not None:
-                command = Command([BodyPath(robot_id, path, joints=joint_ids)])
+                command = Command([BodyPath(robot_bid, path, joints=joint_ids)])
                 return (command,)
             else:
                 return tuple()
                 
         def _consistency_check(q:KinematicConstraint) -> None:
             if isinstance(q,BodyConf):
-                assert (q.body == robot_id) and (q.joints == joint_ids)
+                assert (q.body == robot_bid) and (q.joints == joint_ids)
             elif isinstance(q, BodyPose):
-                assert (q.body == robot_id)
+                assert (q.body == robot_bid)
 
         ft.wraps(qfree_traj)
         def wrapper(q1:KinematicConstraint, q2:KinematicConstraint, grasp:BodyGrasp=None, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
@@ -1265,6 +1267,44 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
     ################################################################################
 
+class LockRenderer(Saver):
+    '''disabling rendering temporarily makes adding objects faster
+    '''
+    def __init__(self, ig:MyiGibsonSemanticInterface, lock:bool=True):
+        self.ig = ig
+        self.client = ig.env.simulator.cid
+        self.originally_locked = not lock
+        self.set_lock(lock=lock)
+
+    def _ignore_if_headless(mthd):
+        @ft.wraps(mthd)
+        def _wrapper(self, *args, **kwargs):
+            # only need to do something if rendering is active
+            if self.has_gui():
+                return mthd(self, *args, **kwargs)
+        return _wrapper
+
+    @_ignore_if_headless
+    def set_lock(self, lock=True):
+        self.locked = lock
+        self._set_renderer(enable=(not lock))
+    
+    @_ignore_if_headless
+    def restore(self):
+        if self.locked != self.originally_locked:
+            self.set_lock(lock=self.originally_locked)
+
+    def has_gui(self):
+        GUI_MODES = (SimulatorMode.GUI_INTERACTIVE, SimulatorMode.GUI_NON_INTERACTIVE)
+        return self.ig.env.simulator.mode in GUI_MODES
+    
+    @_ignore_if_headless
+    def _set_renderer(self, enable):
+        pb.configureDebugVisualizer(pb.COV_ENABLE_RENDERING, int(enable), physicsClientId=self.ig._pbclient)
+
+    
+################################################################################
+
 def format_config(conf:Union[BodyConf,JointPos], dec=3):
     if isinstance(conf,BodyConf):
         conf = conf.configuration
@@ -1292,7 +1332,7 @@ def main():
 
     # x = sim.get_arm_config()
     # config_pprint_str(x)
-    x = sim.get_pose(sim.robot_id) #[0][0]
+    x = sim.get_pose(sim.robot_bid) #[0][0]
     print(x)
     processed = recursive_map_advanced(
         ft.partial(round,ndigits=5), 
@@ -1304,31 +1344,6 @@ def main():
     print(processed)
     # print(round_numeric(x))
     # print(truncate_floats(x))
-
-
-
-
-
-class LockRenderer(Saver):
-    # disabling rendering temporary makes adding objects faster
-    def __init__(self, ig:MyiGibsonSemanticInterface, lock:bool=True):
-        HEADLESS_MODES = SimulatorMode.GUI_INTERACTIVE, SimulatorMode.GUI_NON_INTERACTIVE
-        self.ig = ig
-        self.client = ig.env.simulator.cid
-        self.headless = not ig.env.simulator.mode in HEADLESS_MODES
-        # skip if the visualizer isn't active
-        if not self.headless:
-            self.state = not lock
-            pybullet_tools.utils.set_renderer(enable=self.state)
-            
-
-    def restore(self):
-        if not self.headless:
-            assert self.state is not None
-            if self.state != pybullet_tools.utils.CLIENTS[self.client]:
-                pybullet_tools.utils.set_renderer(enable=self.state)
-
-
 
 
 

@@ -302,7 +302,6 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
 
     _subjects = [q_init, q_goal, *sim.objects]
     
-    g = next(sim.get_grasp_gen()('celery'))[0]
     init = [
         ('AtConf', q_init),
         # ('Grasp', g),
@@ -314,7 +313,7 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
             init += [('Conf', sbj)]
         elif sbj in sim.objects:            
             ObjType = sim.get_object(sbj).category.capitalize()
-            init += [('Obj', sbj)] #, (ObjType, sbj)]
+            init += [('Obj', sbj), (ObjType, sbj)]
             if sim.is_movable(sbj):
                 pose = BodyPose(sbj, [tuple(x) for x in sim.get_pose(sbj)]) # cast back from np.array for less visual clutter
                 init +=[
@@ -331,8 +330,8 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
 
     # goal = ('AtConf', q_goal)
     # goal = ('Holding', 'celery')
-    goal = ('On', 'celery', 'stove')
-    # goal = ( 'exists', ('?p'), ('Placement', '?p', 'celery', 'stove'))
+    # goal = ('On', 'celery', 'stove')
+    goal = ('Cooked', 'radish')
 
     print(f"\n\nINITIAL STATE")
     for fluent in init:

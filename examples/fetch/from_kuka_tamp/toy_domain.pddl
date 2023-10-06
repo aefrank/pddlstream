@@ -28,6 +28,8 @@
         (AtPose ?o ?p)
         (Grasping ?o ?g)
         (GraspForObj ?o ?g)
+        (Cooked ?o)
+        (Cleaned ?o)
         
         ; complex
         (ValidPath ?path)
@@ -52,7 +54,7 @@
     ;     (and (Stackable ?o ?s) (exists (?p) (and (Pose ?p) (AtPose ?o ?p) (Placement ?p ?o ?s))))
     ; )
     (:derived (On ?o ?s)
-          (exists (?p) (and (Placement ?p ?o ?s) (AtPose ?o ?p)))
+          (exists (?p) (and (Obj ?o) (Surface ?s) (Pose ?p) (Placement ?p ?o ?s) (AtPose ?o ?p)))
     )
 
     (:action move
@@ -91,5 +93,20 @@
                             (Placement ?p ?o ?s)
                         )
         :effect (and (AtPose ?o ?p) (not (Grasping ?o ?p)))
+    )
+
+    (:action clean
+        :parameters (?o ?s)
+        :precondition (and (Obj ?o) (Sink ?s) (Stackable ?o ?s)
+                        (On ?o ?s) (not (Cleaned ?o)) )
+        :effect (Cleaned ?o)
+    )
+
+    (:action cook
+        :parameters (?o ?s)
+        :precondition (and (Obj ?o) (Stove ?s) (Stackable ?o ?s)
+                        (On ?o ?s) (Cleaned ?o) )
+        :effect (and (Cooked ?o)
+                 (not (Cleaned ?o)))
     )
 )

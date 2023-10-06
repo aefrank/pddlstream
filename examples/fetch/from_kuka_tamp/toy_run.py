@@ -304,9 +304,6 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
     
     init = [
         ('AtConf', q_init),
-        # ('Grasp', g),
-        # ('GraspForObj', 'celery', g),
-        # ('Grasping', 'celery', g)
     ]
     for sbj in _subjects:
         if isinstance(sbj,BodyConf):

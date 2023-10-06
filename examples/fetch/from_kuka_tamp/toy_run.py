@@ -305,9 +305,9 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
     g = next(sim.get_grasp_gen()('celery'))[0]
     init = [
         ('AtConf', q_init),
-        ('Grasp', g),
-        ('GraspForObj', 'celery', g),
-        ('Grasping', 'celery', g)
+        # ('Grasp', g),
+        # ('GraspForObj', 'celery', g),
+        # ('Grasping', 'celery', g)
     ]
     for sbj in _subjects:
         if isinstance(sbj,BodyConf):
@@ -329,9 +329,9 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
                             init += [('Placement', pose, sbj, _obj)]
 
 
-    goal = ('AtConf', q_goal)
+    # goal = ('AtConf', q_goal)
     # goal = ('Holding', 'celery')
-    # goal = ('On', 'celery', 'floors')
+    goal = ('On', 'celery', 'stove')
     # goal = ( 'exists', ('?p'), ('Placement', '?p', 'celery', 'stove'))
 
     print(f"\n\nINITIAL STATE")

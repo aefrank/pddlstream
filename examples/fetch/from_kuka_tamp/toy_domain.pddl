@@ -87,7 +87,7 @@
     (:action place
         :parameters (?o ?g ?s ?p)
         :precondition (and  (Obj ?o) (Grasp ?g) (Surface ?s) (Pose ?p) 
-                            (GraspForObj ?o ?g) (Grasping ?o ?p) 
+                            (GraspForObj ?o ?g) (Grasping ?o ?g) 
                             (Placement ?p ?o ?s)
                         )
         :effect (and (AtPose ?o ?p) (not (Grasping ?o ?p)))

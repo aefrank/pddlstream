@@ -714,7 +714,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             return tests[T](x)
         else:
             return ValueError(
-                f"Type T={T} is not a KinematicConstraint type. Expected one of {[KinematicConstraint]+get_args(KinematicConstraint)}."
+                f"Type T={T} is not a KinematicConstraint type. Expected one of {[KinematicConstraint]+list(get_args(KinematicConstraint))}."
             )
 
 

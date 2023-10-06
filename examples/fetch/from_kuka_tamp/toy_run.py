@@ -8,7 +8,9 @@ import os
 import functools as ft
 import inspect as ins
 import sys
-from typing import Any, NamedTuple, NamedTuple, Optional, Tuple, Iterable
+import numpy as np
+from typing import Any, NamedTuple, NamedTuple, Optional, Tuple, Iterable, Union
+from igibson.tasks.behavior_task import is_movable
 
 from igibson.utils.assets_utils import get_all_object_categories, get_ig_model_path, get_object_models_of_category
 from numpy import random
@@ -20,7 +22,7 @@ from igibson.objects.object_base import BaseObject
 
 from examples.fetch.from_kuka_tamp.fetch_primitives import UID, MyiGibsonSemanticInterface
 from examples.fetch.from_kuka_tamp.utils.object_spec import Euler, Kwargs, Orientation3D, Position3D, Quaternion
-from examples.pybullet.utils.pybullet_tools.kuka_primitives import BodyConf, BodyPath
+from examples.pybullet.utils.pybullet_tools.kuka_primitives import BodyConf, BodyPath, BodyPose
 from pddlstream.algorithms.meta import create_parser, solve
 from pddlstream.language.constants import PDDLProblem
 from pddlstream.language.generator import from_fn
@@ -40,26 +42,6 @@ def motion_plan(sim, q1, q2):
     return (BodyPath(sim.robot_bid, sim.plan_arm_joint_motion(q1,q2)),)
 
 
-def get_pddlproblem(sim, q1, q2):
-    if not isinstance(q1,BodyConf): q1 = BodyConf(sim.robot_bid, q1)
-    if not isinstance(q2,BodyConf): q2 = BodyConf(sim.robot_bid, q2)
-
-    domain_pddl = read(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toy_domain.pddl'))
-    constant_map = {}
-    stream_pddl =  read(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toy_stream.pddl'))
-    
-    motion_planner = ft.partial(motion_plan, sim)
-    sample_arm_config = sim.sample_arm_config
-    stream_map = {
-        'sample-conf' : from_fn(sample_arm_config),
-        'motion-plan' : from_fn(motion_planner)
-    }
-
-    init = [("Conf", q1), ("AtConf", q1), ("Conf", q2)]
-    goal = ("AtConf", q2)
-    
-    problem=PDDLProblem(domain_pddl, constant_map, stream_pddl, stream_map, init, goal)
-    return problem
 
 class ObjSpec(UserDict):
     URDF_ARGS = list(ft.reduce( lambda d1,d2: d1 | d2, 
@@ -82,7 +64,6 @@ class ObjSpec(UserDict):
     def extract_file_info(self, category, *, model=None, model_path=None, **kwargs):
         if category not in get_all_object_categories():
             raise ValueError(f"Unable to find object category '{category}' in assets.")
-
         if model is None: 
             model = random.choice(get_object_models_of_category(category))
         if model_path is None:
@@ -100,7 +81,6 @@ class ObjSpec(UserDict):
 
     
     _RAISED_ERROR_PASSER = NamedTuple('_RAISED_ERROR_PASSER', [('error', Exception)])
-
     def __get_attr_or_err(self, attr:str) -> Any: 
         try:
             return object.__getattribute__(self, attr)
@@ -123,27 +103,6 @@ class ObjSpec(UserDict):
                 return data[attr]
         # couldn't resolve error 
         raise value.error
-        
-
-
-        
-        # try:
-        #     return object.__getattribute__(self, attr)
-        # except AttributeError as e:
-        #     if attr!='data': # avoid loop
-        #         try:
-        #             data = object.__getattribute__(self,'data')
-        #             if attr in data:
-        #                 return data[attr]
-        #         except Exception:
-        #             pass
-        #         raise e
-
-        # if attr!='data' and not self.__hasattr__(attr) and self.__hasattr__('data'):
-        #     data = object.__getattribute__(self, 'data')
-        #     if attr in data:
-        #         return data[attr]
-        # return object.__getattribute__(self,attr)
         
 
     def __setattr__(self, attr, value):
@@ -178,20 +137,7 @@ class ObjSpec(UserDict):
         object.__setattr__(self, attr, value)
             
                 
-                
 
-        # try:
-        #     object.__getattribute__(self, attr) # check if self.attr exists
-        # except AttributeError as e:
-        #     if attr!='data':
-        #         try:
-        #             data = object.__getattribute__(self,'data')
-        #             if attr in data:
-        #                 data[attr] = value
-        #                 return
-        #         except Exception:
-        #             pass
-        # object.__setattr__(self, attr, value)
             
         
 
@@ -266,38 +212,95 @@ def init_sim(objects:Iterable[ObjSpec]=[]):
 
 ##############################################################################
 
+def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Optional[Union[float,BodyConf]]=None):
+    if q_init is None:                     
+        q_init = BodyConf(sim.robot_bid, sim.get_arm_config())
+    else:
+        sim.set_arm_config(q_init)
+        if not isinstance(q_init, BodyConf): 
+            q_init = BodyConf(sim.robot_bid, q_init)
+    if not isinstance(q_goal, BodyConf): 
+        q_goal = BodyConf(sim.robot_bid, q_goal)
+
+    objects  = [sim.get_bid(obj) for obj in sim.objects]
+    movable  = [sim.get_bid(obj) for obj in sim.objects if sim.is_movable(obj)]
+    fixed    = [sim.get_bid(obj) for obj in sim.objects if not sim.is_movable(obj)]
+    surfaces = [sim.get_bid(obj) for obj in sim.objects if not sim.is_movable(obj) and not obj in ['walls', 'ceilings']]
+
+    _subjects = [q_init, q_goal, *objects]
+    
+    init = [('AtConf', q_init)]
+    for sbj in _subjects:
+        if isinstance(sbj,BodyConf):
+            init += [('Conf', sbj)]
+        elif sbj in objects:            
+            ObjType = sim.get_object(sbj).category.capitalize()
+            init += [(ObjType, sbj)]
+            if sim.is_movable(sbj):
+                pose = BodyPose(sbj, [tuple(x) for x in sim.get_pose(sbj)]) # cast back from np.array for less visual clutter
+                init +=[
+                    ('Pose', pose),
+                    ('AtPose', pose),
+                    ('Graspable', sbj)
+                ]
+                # find surface that it is on
+                for _obj in objects:
+                    if not sim.is_movable(_obj) and not sim.get_name(_obj) in ['walls', 'ceilings']:
+                        if sim.is_on(sbj, _obj):
+                            init += [('Supported', sbj, pose, _obj)]
+
+
+
+    goal = ('AtConf', q_goal)
+    
+    for fluent in init:
+        fluent = tuple(
+            (sim.get_name(arg) if isinstance(arg,int) else 
+             tuple(np.round(arg.configuration,3)) if isinstance(arg,BodyConf) else 
+             (sim.get_name(arg.body), *(tuple(np.round(p,3)) for p in arg.pose)) if isinstance(arg, BodyPose) else 
+             arg) for arg in fluent
+        )
+
+        print(fluent)
+
+    sys.exit()
+
+
+    domain_pddl = read(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toy_domain.pddl'))
+    constant_map = {}
+    stream_pddl =  read(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toy_stream.pddl'))
+    
+    motion_planner = ft.partial(motion_plan, sim)
+    sample_arm_config = sim.sample_arm_config
+    stream_map = {
+        'sample-conf' : from_fn(sample_arm_config),
+        'motion-plan' : from_fn(motion_planner)
+    }
+    problem=PDDLProblem(domain_pddl, constant_map, stream_pddl, stream_map, init, goal)
+    return problem
+
+
+
 def main():
     sink   = ObjSpec("sink",  "sink",    position=(-0.5,  0.0, 0.0), on_floor=True, fixed_base=True)
     stove  = ObjSpec("stove",  "stove",  position=(+0.5,  0.0, 0.0), on_floor=True, fixed_base=True)
     celery = ObjSpec("celery", "celery", position=( 0.0, +0.5, 0.0), on_floor=True, fixed_base=False)
     radish = ObjSpec("radish", "radish", position=( 0.0, -0.5, 0.0), on_floor=True, fixed_base=False)
-    # print(celery)
-    # print(celery.urdf_kwargs)
-    # print(celery.properties)
-    celery.name = "cel"
 
     sim = init_sim(objects=[sink,stove,celery,radish])
-    print(sim.objects)
-    print(celery)
-    # for obj in (sink,stove,celery,radish):
-    #     load_object(sim, obj)
-    # for obj in (sink,stove,celery,radish):
-    #     init_object_state(sim, obj['name'], **obj.state)
     
-    
+    qinit = sim.get_arm_config()
+    qgoal = sim.sample_arm_config(max_attempts=100)
+    print(qinit)
+    print(qgoal)
 
-    # qinit = sim.get_arm_config()
-    # qgoal = sim.sample_arm_config(max_attempts=100)
-    # print(qinit)
-    # print(qgoal)
+    plan = motion_plan(sim, qinit, qgoal)
+    print('motion plan length:', len(plan))
+    print('\n\n\n')
 
-    # plan = motion_plan(sim, qinit, qgoal)
-    # print('motion plan length:', len(plan))
-    # print('\n\n\n')
-
-    # problem = get_pddlproblem(sim, qinit, qgoal)
-    # solution = solve(problem, unit_costs=True, debug=True)
-    # print(solution)
+    problem = get_pddlproblem(sim, qinit, qgoal)
+    solution = solve(problem, unit_costs=True, debug=True)
+    print(solution)
 
 
 

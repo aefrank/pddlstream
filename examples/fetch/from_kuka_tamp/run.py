@@ -160,17 +160,27 @@ def main():
 
 
     try:
-        with Profiler():
-            with LockRenderer(sim, lock=True): # disable rendering during object loading
-                solution = solve(
-                    problem, 
-                    algorithm=args.algorithm, 
-                    unit_costs=True, 
-                    success_cost=INF
-                )
-                saver.restore()
-        print_solution(solution)
-        plan, cost, evaluations = solution
+        # with Profiler():
+        #     with LockRenderer(sim, lock=True): # disable rendering during object loading
+        #         solution = solve(
+        #             problem, 
+        #             algorithm=args.algorithm, 
+        #             unit_costs=True, 
+        #             success_cost=INF,
+        #             debug=True
+        #         )
+        #         saver.restore()
+        solution = solve(
+            problem, 
+            algorithm=args.algorithm, 
+            unit_costs=True, 
+            success_cost=INF,
+            debug=True
+        )
+        saver.restore()
+        print(solution)
+        # print_solution(solution)
+        # plan, cost, evaluations = solution
     finally:
         sim.close()
 

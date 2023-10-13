@@ -41,7 +41,7 @@ from igibson.utils.behavior_robot_motion_planning_utils import HAND_MAX_DISTANCE
 
 # Custom modules
 from utils.object_spec import \
-    ObjectSpec, Orientation, Position, _as_urdf_spec
+    Kwargs, ObjectSpec, Orientation, Position, Euler, _as_urdf_spec
 from examples.fetch.from_kuka_tamp.utils.utils import \
     import_from, is_numeric_vector, nonstring_iterable, recursive_map_advanced, round_numeric, PybulletToolsVersion, import_module
 
@@ -255,11 +255,14 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         self.load_objects(objects, verbose=verbose)
         self._init_object_state(objects,verbose=verbose)
         self._init_robot_state()
+        # Setup viewer if needed
+        if not headless:
+            self._viewer_setup()
 
-    def _init_igibson(self, config:Union[str,dict]={}, headless:bool=True) -> Tuple[iGibsonEnv, MotionPlanningWrapper]:
+    def _init_igibson(self, config:Union[str,dict]={}, headless:bool=True, **config_options:Kwargs) -> Tuple[iGibsonEnv, MotionPlanningWrapper]:
         # Load simulation config
         if isinstance(config,str): 
-            config = self._load_config(config_file=config)
+            config = self._load_config(config_file=config, **config_options)
         assert isinstance(config,dict)
         if not config['robot']['name'] == 'Fetch':
             raise NotImplementedError(f"{self.__class__.__name__} is only currently implemented for a single Fetch robot.")
@@ -281,18 +284,18 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             visualize_2d_result=False,
         )
         self._motion_planner = motion_planner
-        # Setup viewer if needed
-        if not headless:
-            self._viewer_setup()
+        
     
-    def _load_config(self, config_file:str) -> dict:
+    def _load_config(self, config_file:str, load_object_categories:Optional[List[str]]=[], **config_options:Kwargs) -> dict:
         config_file = os.path.abspath(config_file)
-        config_data = parse_config(config_file)
-
-        # don't load default furniture, etc.
-        config_data["load_object_categories"] = []  # accelerate loading (only building structures)
-        config_data["visible_target"] = False
-        config_data["visible_path"] = False
+        config_data:dict = parse_config(config_file)
+        
+        # don't load default furniture, etc. to accelerate loading (only building structures)
+        if load_object_categories is not None:
+            config_data["load_object_categories"] = load_object_categories
+        config_data['visible_target'] = False
+        config_data['visible_path'] = False
+        config_data.update(config_options) # overwrite config file with specified options
 
         # Reduce texture scale for Mac.
         if sys.platform == "darwin":    config_data["texture_scale"] = 0.5
@@ -300,10 +303,10 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         self._config = config_data
         return self._config
     
-    def _viewer_setup(self) -> None:
+    def _viewer_setup(self, position:Position=[-0.8, 0.7, 1.7], orientation:Euler=[0.1, -0.9, -0.5]) -> None:
         # Set viewer camera 
-        self.env.simulator.viewer.initial_pos = [-0.8, 0.7, 1.7]
-        self.env.simulator.viewer.initial_view_direction = [0.1, -0.9, -0.5]
+        self.env.simulator.viewer.initial_pos = position
+        self.env.simulator.viewer.initial_view_direction = orientation
         self.env.simulator.viewer.reset_viewer()
         # Note: this was taken from iGibson motion planning example; 
         #       might want to refer to default camera used in pddlstream kuka 
@@ -350,15 +353,15 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 if state in spec:    
                     self.set_state(spec["name"], state, spec[state])
             
-    def _init_robot_state(self) -> None:
+    def _init_robot_state(self, position:Position=(0,0,0), orientation=(0,0,0), tuck:bool=False) -> None:
         '''Initialize robot state. 
         
         WARNING: this steps sim; no objects can be added to scene after this is called.
         '''
-        self.env.reset()
-        self.env.land(self.env.robots[0], [0, 0, 0], [0, 0, 0]) # note: this steps sim!
+        # self.env.reset()
+        self.env.land(self.env.robots[0], position, orientation) # note: this steps sim!
         for robot in self.env.robots:
-            robot.tuck() # tuck arm 
+            robot.tuck() if tuck else robot.untuck()
     
     ################################################################################
     ################################################################################   
@@ -967,7 +970,8 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 except ActionPrimitiveError:
                     continue
                 if placement is not None:
-                    yield BodyPose(body, placement)
+                    pose = BodyPose(body, placement)
+                    yield (pose,)
         return gen
     
     

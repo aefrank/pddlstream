@@ -1,6 +1,6 @@
 # scene
 scene: igibson
-scene_id: Rs_int
+scene_id: Merom_1_int
 build_graph: true
 load_texture: true
 pybullet_load_texture: true
@@ -43,18 +43,21 @@ hide_robot: false
 
 # task
 # task: room_rearrangement
-load_object_categories: []
+load_object_categories: [
 #     dishwasher,
 #     fridge,
 #     microwave,
 #     oven,
 #     washer
 #     dryer,
-#     sink,
-#     stove,
+    bottom_cabinet,
+    shelf,
+    table,
+    sink,
+    stove,
 #     celery,
 #     radish
-# ]
+]
 # load_room_types: [
 #   kitchen
 # ]

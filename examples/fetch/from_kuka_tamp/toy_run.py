@@ -8,8 +8,9 @@ import os
 import functools as ft
 import inspect as ins
 import sys
+from typing_extensions import TypeAlias
 import numpy as np
-from typing import Any, List, NamedTuple, NamedTuple, NoReturn, Optional, Tuple, Iterable, Union
+from typing import Any, List, NamedTuple, NamedTuple, NewType, NoReturn, Optional, Tuple, Iterable, Union
 from igibson.tasks.behavior_task import is_mesh_on_surface, is_movable
 
 from igibson.utils.assets_utils import get_all_object_categories, get_ig_model_path, get_object_models_of_category
@@ -31,7 +32,7 @@ from pddlstream.utils import Profiler, read
 
 ##############################################################################
 
-
+Pose: TypeAlias = Tuple[Position3D, Orientation3D]
 
 
 
@@ -134,63 +135,17 @@ class ObjSpec(UserDict):
         # create a new attribute on self; both cases are handled by:
         object.__setattr__(self, attr, value)
             
-                
-
-            
-        
-
-
-def load_object(sim:MyiGibsonSemanticInterface, spec:ObjSpec, verbose:bool=True):
-    URDF_kwargs = {
-            'avg_obj_dims' : get_ig_avg_category_specs().get(spec.category),
-            'fit_avg_dim_volume' : True,
-            'texture_randomization' : False,
-            'overwrite_inertial' : True,
-        }
-        
-    URDF_kwargs.update(**spec.urdf_kwargs)
-
-    if verbose: 
-        print(
-            f"Loading {spec.category.capitalize()} object '{spec.name}'...",
-            end=''
-        )  
-    
-    # Create and import the object
-    sim_obj = URDFObject(**URDF_kwargs)
-    sim.env.simulator.import_object(sim_obj)
-
-    if verbose: 
-        print(" done.")
-            
-    # Return obj body_ids
-    return sim.get_bid(sim_obj)
-
-def init_object_state(  
-                sim:MyiGibsonSemanticInterface,
-                name:str,
-                position:Position3D=(0,0,0), 
-                orientation:Orientation3D=Euler(0,0,0), 
-                on_floor:bool=False, 
-                **state:Kwargs
-):
-    if len(orientation)==4:
-        orientation = quat2euler(orientation)
-    if on_floor:
-        sim.env.land(sim.get_object(name), position, orientation)
-    else:
-        sim.set_position_orientation(name, position, orientation)
-    
-    if not state=={}:
-        raise NotImplementedError(f"No handling defined for state variables {list(state)}")
         
 class ModifiedMiGSI(MyiGibsonSemanticInterface):
 
-    def __init__(self, config_file:str, objects:Iterable[ObjSpec]=[], *, headless:bool=True, verbose=True):
-        self._init_igibson(config=config_file, headless=headless)
+    def __init__(self, config_file:str, objects:Iterable[ObjSpec]=[], headless:bool=True, 
+                 *, robot_pose:Pose=((0,0,0),(0,0,0)), viewer_pose:Optional[Pose]=None, verbose=True):
+        self._init_igibson(config=config_file, headless=headless, load_object_categories=None)
         self._load_objects(objects)
         self._init_objects(objects)
-        self._init_robot_state()
+        self._init_robot_state(*robot_pose)
+        if not headless:
+            self._viewer_setup(*viewer_pose) if viewer_pose is not None else self._viewer_setup()
     
     def _load_objects(self, specs:Iterable[ObjSpec], verbose: bool = True) -> List[BID]:
         def load_single_object(spec:ObjSpec):
@@ -251,19 +206,26 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
 
 
 
-def init_sim(objects:Iterable[ObjSpec]=[]):
-    parser = create_parser()
-    parser.add_argument('-g','--gui', action='store_true', help='Render and visualize the system')
-    args = parser.parse_args()
-
+def init_sim(objects, headless=True, **kwargs):
+    
     dir_path = os.path.dirname(os.path.realpath(__file__))
     config = "fetch_tamp.yaml"
     config_path = os.path.join(dir_path,config)
 
+    robot_pose=((-1.2,5.4,0),(0,0,0))
+    viewer_pose=((-0.6,3.9,1.8),(-0.4,0.9,-0.3))
+
+    KWARGS = {
+        'headless' : headless,
+        'robot_pose' : robot_pose,
+        'viewer_pose' : viewer_pose,
+    }
+    KWARGS.update(kwargs)
+
     sim = ModifiedMiGSI(
-        config_file=config_path, 
+        config_file=config_path,
         objects=objects,
-        headless=(not args.gui)
+        **KWARGS
     )
     return sim
 
@@ -365,19 +327,9 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
     return problem
 
 
-
-def main():
-    DEBUG = True
-
-    sink   = ObjSpec("sink",  "sink",    position=(-0.5,  0.0, 0.0), on_floor=True, fixed_base=True)
-    stove  = ObjSpec("stove",  "stove",  position=(+0.5,  0.0, 0.0), on_floor=True, fixed_base=True)
-    celery = ObjSpec("celery", "celery", position=( 0.0, +0.5, 0.0), on_floor=True, fixed_base=False)
-    radish = ObjSpec("radish", "radish", position=( 0.0, -0.5, 0.0), on_floor=True, fixed_base=False)
-
-    sim = init_sim(objects=[sink,stove,celery,radish])
-    
+def run_planner(sim:ModifiedMiGSI, debug:bool=False, display:bool=True):
     qinit = sim.get_arm_config()
-    if DEBUG: 
+    if debug: 
         qgoal = (0.12424097874999764, 1.3712678552985822, -0.3116053947850258, 2.62593026717931, 1.190838900298941, 0.2317687545849476, 1.0115493242626759, -1.2075981800730915) # avoid spending time sampling during debugging
     else:
         qgoal = sim.sample_arm_config(max_attempts=100)
@@ -389,19 +341,57 @@ def main():
     print('\n\n\n')
 
     problem = get_pddlproblem(sim, qinit, qgoal)
-    solution = solve(problem, unit_costs=True, debug=DEBUG)
-    print(solution)
+    solution = solve(problem, unit_costs=True, debug=debug)
+    if display:
+        print(solution)
+        print('\n\n')
+        for fluent in solution.certificate.all_facts:
+            fluent = tuple(
+                (sim.get_name(arg) if isinstance(arg,int) else 
+                tuple(np.round(arg.configuration,3)) if isinstance(arg,BodyConf) else 
+                (sim.get_name(arg.body), *(tuple(np.round(p,3)) for p in arg.pose)) if isinstance(arg, BodyPose) else 
+                arg) for arg in fluent
+            )
 
-    print('\n\n')
-    for fluent in solution.certificate.all_facts:
-        fluent = tuple(
-            (sim.get_name(arg) if isinstance(arg,int) else 
-             tuple(np.round(arg.configuration,3)) if isinstance(arg,BodyConf) else 
-             (sim.get_name(arg.body), *(tuple(np.round(p,3)) for p in arg.pose)) if isinstance(arg, BodyPose) else 
-             arg) for arg in fluent
-        )
+            print(fluent)
 
-        print(fluent)
+def visualize_sim(sim:ModifiedMiGSI):
+    sim.env.simulator.viewer.reset_viewer()
+
+    while True:
+        action = np.zeros(sim.env.action_space.shape)
+        state, reward, done, x = sim.env.step(action)
+        print(state, reward, done, x)
+
+
+def main():
+    parser = create_parser()
+    parser.add_argument('-g','--gui', action='store_true', help='Render and visualize the system')
+    args = parser.parse_args()
+
+    DEBUG = True
+    GUI = args.gui if (gui_env_var:=os.getenv("USE_GUI")) is None else gui_env_var
+
+    counter = ObjSpec("counter", "bottom_cabinet", position=(1, -1, 0.0), on_floor=True, fixed_base=True)
+    # sink   = ObjSpec("sink",  "sink",    position=(-0.5,  0.0, 0.0), on_floor=True, fixed_base=True)
+    stove  = ObjSpec("stove",  "stove",  position=(+0.5,  0.0, 0.0), on_floor=True, fixed_base=True)
+    celery = ObjSpec("celery", "celery", position=( 0.0, +0.5, 0.0), on_floor=True, fixed_base=False)
+    radish = ObjSpec("radish", "radish", position=( 0.0, -0.5, 0.0), on_floor=True, fixed_base=False)
+    objects = []
+    # [counter, #sink,
+    #     stove,celery,radish
+    # ]
+    
+
+    sim = init_sim(objects=objects, headless=(not GUI))
+    # solution = run_planner(sim, debug=DEBUG, display=True)
+    visualize_sim(sim)
+
+
+    
+    
+
+    
 
 
 

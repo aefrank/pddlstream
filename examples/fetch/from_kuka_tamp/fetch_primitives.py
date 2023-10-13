@@ -186,7 +186,7 @@ class iGibsonSemanticInterface:
     # Orientation getter/setter
     def get_orientation(self, body:UID) -> Orientation:
         return self.get_object(body).get_orientation()    
-    def set_orientation(self, body:UID, orientation:Orientation, *, force_quaternion=False) -> None:
+    def set_orientation(self, body:UID, orientation:Orientation, *, force_quaternion=True) -> None:
         if force_quaternion and len(orientation)==3:
             orientation = quatToXYZW(euler2quat(*orientation), "wxyz")
         self.get_object(body).set_orientation(orn=orientation)
@@ -198,7 +198,7 @@ class iGibsonSemanticInterface:
                                  position:Position, 
                                  orientation:Orientation, 
                                  *, 
-                                 force_quaternion=False) -> None:
+                                 force_quaternion=True) -> None:
         self.set_position(body=body, position=position)
         self.set_orientation(body=body, orientation=orientation, force_quaternion=force_quaternion)
 
@@ -286,15 +286,16 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         self._motion_planner = motion_planner
         
     
-    def _load_config(self, config_file:str, load_object_categories:Optional[List[str]]=[], **config_options:Kwargs) -> dict:
+    def _load_config(self, config_file:str, load_object_categories:Optional[List[str]]=[], visualize_planning=False, **config_options:Kwargs) -> dict:
         config_file = os.path.abspath(config_file)
         config_data:dict = parse_config(config_file)
         
         # don't load default furniture, etc. to accelerate loading (only building structures)
         if load_object_categories is not None:
             config_data["load_object_categories"] = load_object_categories
-        config_data['visible_target'] = False
-        config_data['visible_path'] = False
+        if not visualize_planning:
+            config_data['visible_target'] = False
+            config_data['visible_path'] = False
         config_data.update(config_options) # overwrite config file with specified options
 
         # Reduce texture scale for Mac.
@@ -358,7 +359,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         
         WARNING: this steps sim; no objects can be added to scene after this is called.
         '''
-        # self.env.reset()
+        self.env.reset()
         self.env.land(self.env.robots[0], position, orientation) # note: this steps sim!
         for robot in self.env.robots:
             robot.tuck() if tuck else robot.untuck()

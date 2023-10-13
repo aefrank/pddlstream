@@ -9,12 +9,13 @@ import functools as ft
 import inspect as ins
 import sys
 from typing_extensions import TypeAlias
+from igibson import object_states
 import numpy as np
 from typing import Any, List, NamedTuple, NamedTuple, NewType, NoReturn, Optional, Tuple, Iterable, Union
 from igibson.tasks.behavior_task import is_mesh_on_surface, is_movable
 
 from igibson.utils.assets_utils import get_all_object_categories, get_ig_model_path, get_object_models_of_category
-from numpy import random
+from numpy import pi, random
 from transforms3d.euler import quat2euler
 from examples.pybullet.utils.pybullet_tools.utils import Attachment
 from iGibson.igibson.utils.assets_utils import get_ig_avg_category_specs
@@ -22,7 +23,7 @@ from iGibson.igibson.utils.assets_utils import get_ig_avg_category_specs
 from igibson.action_primitives.starter_semantic_action_primitives import URDFObject
 from igibson.objects.object_base import BaseObject
 
-from examples.fetch.from_kuka_tamp.fetch_primitives import BID, UID, MyiGibsonSemanticInterface
+from examples.fetch.from_kuka_tamp.fetch_primitives import BID, UID, MyiGibsonSemanticInterface, Object
 from examples.fetch.from_kuka_tamp.utils.object_spec import Euler, Kwargs, ObjectSpec, Orientation3D, Position3D, Quaternion
 from examples.pybullet.utils.pybullet_tools.kuka_primitives import Attach, BodyConf, BodyGrasp, BodyPath, BodyPose
 from pddlstream.algorithms.meta import create_parser, solve
@@ -36,12 +37,6 @@ Pose: TypeAlias = Tuple[Position3D, Orientation3D]
 
 
 
-
-
-
-
-
-
 class ObjSpec(UserDict):
     URDF_ARGS = list(ft.reduce( lambda d1,d2: d1 | d2, 
         [set(ins.getfullargspec(c)[0]) 
@@ -52,13 +47,16 @@ class ObjSpec(UserDict):
 
     def __init__(self, name, category, **kwargs:Kwargs):
         self.data = {'name':name, 'category':category}
-        self.data.update(dict(
-            zip(('filename', 'model_path'), self.extract_file_info(category, **kwargs))
-        ))
-        self.data.update(kwargs)
         
-        self._state_keys = [key for key in self.data if key not in ObjSpec.URDF_ARGS]
+        kwargs.update(self.extract_file_info(category, **kwargs))
+        if 'model' in kwargs: kwargs.pop('model')
+        if 'scale' in kwargs and not isinstance(kwargs['scale'], np.ndarray):
+            val = kwargs['scale']
+            kwargs['scale'] = np.array(val) if not isinstance(val, (int,float)) else val*np.ones(3)
+
+        self.data.update(kwargs)
         self._urdf_keys  = [key for key in self.data if key in ObjSpec.URDF_ARGS]
+        self._state_keys = [key for key in self.data if key not in ObjSpec.URDF_ARGS]
 
     def extract_file_info(self, category, *, model=None, model_path=None, **kwargs):
         if category not in get_all_object_categories():
@@ -68,7 +66,7 @@ class ObjSpec(UserDict):
         if model_path is None:
             model_path = get_ig_model_path(self.data["category"], model)
         filename = os.path.join(model_path, model + ".urdf")
-        return filename, model_path
+        return {'filename' : filename, 'model_path': model_path}
 
     @property
     def urdf_kwargs(self):
@@ -138,22 +136,29 @@ class ObjSpec(UserDict):
         
 class ModifiedMiGSI(MyiGibsonSemanticInterface):
 
+    @property
+    def _objects(self):
+        return [obj for obj in self.env.scene.get_objects() if not obj.category in ["agent","walls","floors","ceilings"]]
+    @property 
+    def objects(self):
+        return [obj.name for obj in self._objects]
+
     def __init__(self, config_file:str, objects:Iterable[ObjSpec]=[], headless:bool=True, 
-                 *, robot_pose:Pose=((0,0,0),(0,0,0)), viewer_pose:Optional[Pose]=None, verbose=True):
-        self._init_igibson(config=config_file, headless=headless, load_object_categories=None)
+                 *, robot_pose:Pose=((0,0,0),(0,0,0)), viewer_pose:Optional[Pose]=None, verbose=True, **config_options:Kwargs):
+        self._init_igibson(config=config_file, headless=headless, **config_options)
         self._load_objects(objects)
         self._init_objects(objects)
         self._init_robot_state(*robot_pose)
         if not headless:
             self._viewer_setup(*viewer_pose) if viewer_pose is not None else self._viewer_setup()
-    
+
     def _load_objects(self, specs:Iterable[ObjSpec], verbose: bool = True) -> List[BID]:
         def load_single_object(spec:ObjSpec):
-            if verbose: print(f"Loading {spec.category.capitalize()} object '{spec.name}'...", end='')  
+            if verbose: print(f"Loading {spec['category'].capitalize()} object '{spec['name']}'...", end='')  
 
             URDF_kwargs = {
-                'avg_obj_dims' : get_ig_avg_category_specs().get(spec.category),
-                'fit_avg_dim_volume' : True,
+                'avg_obj_dims' : get_ig_avg_category_specs().get(spec['category']),
+                'fit_avg_dim_volume' : False,
                 'texture_randomization' : False,
                 'overwrite_inertial' : True,
             }
@@ -177,20 +182,21 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
                       name:str,
                       position:Position3D=(0,0,0), 
                       orientation:Orientation3D=Euler(0,0,0), 
-                      on_floor:bool=False, 
+                      land:bool=False, 
                       **state:Kwargs) -> None:
-        if len(orientation)==4:
-            orientation = quat2euler(orientation)
-        if on_floor:
-            self.env.land(self.get_object(name), position, orientation)
+        if land:
+            self.land(name, position, orientation)
         else:
             self.set_position_orientation(name, position, orientation)
         if not state=={}:
             raise NotImplementedError(f"No handling defined for state variables {list(state)}")
     
     def _init_objects(self, specs:Iterable[ObjSpec]) -> None:
+        pose = self.get_pose(self.robot)
+        self.set_position(self.robot, (100,100,100))
         for spec in specs:
             self._init_object_statevars(spec.name, **spec.state)
+        self.set_pose(self.robot, pose)
     
     def _init_object_state(self, obj_specs: Iterable[ObjectSpec], *, verbose=True) -> None:
         raise NotImplementedError
@@ -199,9 +205,15 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
     def is_surface(self, obj:UID):
         return not self.is_movable(obj) and (self.get_object(obj).category.lower() not in ['walls', 'ceilings'])
     
-    # def sample_placement_BodyPose(self, obj:UID, surface:UID) -> BodyPose:
-    #     placement = self.sample_placement(obj, surface)
-    #     return BodyPose(obj, placement)
+    def land(self, obj:Object, position:Optional[Position3D]=None, orientation:Optional[Orientation3D]=None):
+        if position is None:    position = self.get_position(obj)
+        if orientation is None: orientation = self.get_orientation(obj)
+        if len(orientation)==4: orientation = quat2euler(orientation)
+
+        obj = self.get_object(obj)
+        if obj.fixed_base:
+            print(f"WARNING: {self.__class__.__name__}.land() called on object '{obj.name}' with fixed_base=True.")
+        self.env.land(obj, position, orientation)
 
 
 
@@ -212,13 +224,15 @@ def init_sim(objects, headless=True, **kwargs):
     config = "fetch_tamp.yaml"
     config_path = os.path.join(dir_path,config)
 
-    robot_pose=((-1.2,5.4,0),(0,0,0))
+    robot_pose=((-1.2,5.4,0),(0,0,pi)) 
     viewer_pose=((-0.6,3.9,1.8),(-0.4,0.9,-0.3))
 
     KWARGS = {
         'headless' : headless,
         'robot_pose' : robot_pose,
         'viewer_pose' : viewer_pose,
+        # 'load_object_categories': ['sink','stove', 'bottom_cabinet'],
+        # 'load_room_types' : ['kitchen'],
     }
     KWARGS.update(kwargs)
 
@@ -227,6 +241,7 @@ def init_sim(objects, headless=True, **kwargs):
         objects=objects,
         **KWARGS
     )
+
     return sim
 
 ##############################################################################
@@ -361,7 +376,9 @@ def visualize_sim(sim:ModifiedMiGSI):
     while True:
         action = np.zeros(sim.env.action_space.shape)
         state, reward, done, x = sim.env.step(action)
-        print(state, reward, done, x)
+        # print(state, reward, done, x)
+        # print(sim.get_pose('stove'))
+        # print(sim.get_object('stove').states[object_states.AABB].get_value())
 
 
 def main():
@@ -372,21 +389,50 @@ def main():
     DEBUG = True
     GUI = args.gui if (gui_env_var:=os.getenv("USE_GUI")) is None else gui_env_var
 
-    counter = ObjSpec("counter", "bottom_cabinet", position=(1, -1, 0.0), on_floor=True, fixed_base=True)
-    # sink   = ObjSpec("sink",  "sink",    position=(-0.5,  0.0, 0.0), on_floor=True, fixed_base=True)
-    stove  = ObjSpec("stove",  "stove",  position=(+0.5,  0.0, 0.0), on_floor=True, fixed_base=True)
-    celery = ObjSpec("celery", "celery", position=( 0.0, +0.5, 0.0), on_floor=True, fixed_base=False)
-    radish = ObjSpec("radish", "radish", position=( 0.0, -0.5, 0.0), on_floor=True, fixed_base=False)
-    objects = []
-    # [counter, #sink,
-    #     stove,celery,radish
-    # ]
-    
+    counter = ObjSpec("counter", "countertop", model='counter_0',
+                      position=(-2.35,  4.95,  0.35),
+                    #   position=(-2.36734748,  5.5552516 ,  0.45443946),
+                      orientation=(0,0,pi/2),
+                    #   orientation=(-0.        , -0.        ,  0.70853085,  0.70567984), 
+                      fixed_base=True,
+                    #   scale=np.array((0.5, 0.5, 0.7)),
+                    #   scale=np.array((0.44914447, 0.52874679, 0.63933571)),
+                    #   bounding_box=(0.496562, 0.614757, 0.891),
+                      bounding_box=(1.0, 0.5, 0.75),
+                      )
+    sink   = ObjSpec("sink",  "sink", model='kitchen_sink',    
+                     position=(-2.35,  5.8,  0.3),
+                     orientation=(0,0,pi/2),
+                     fixed_base=True,
+                    #  scale=np.array([0.97625266, 0.70599113, 0.78163018]),
+                     bounding_box=(0.75,  0.5,  0.75),
+                    #  bounding_box=(0.88,  0.62,  1.089),
+                     )
+    stove  = ObjSpec("stove",  "stove", model='101924',
+                     position=(-0.225  , 5.75,  0.6), 
+                    #  position=(-0.221481  ,  5.92155266,  0.52469647), 
+                     orientation=(0,0,-pi/2),
+                     fixed_base=True,
+                    #  scale=np.array((0.68030202, 0.93826808, 0.78960697)), 
+                     bounding_box=(1.0,  0.75,  1.25),
+                    )
+    celery = ObjSpec("celery", "celery", model='celery_000', 
+                     position=(-2.3,  5.1,  1.0), land=True, fixed_base=False, scale=0.15)
+    radish = ObjSpec("radish", "radish", model='45_0', 
+                     position=(-2.15,  5.3,  1.0), land=True, fixed_base=False, scale=1.25)
+    objects = [sink, stove, counter, celery, radish]
 
-    sim = init_sim(objects=objects, headless=(not GUI))
-    # solution = run_planner(sim, debug=DEBUG, display=True)
+    sim = init_sim(objects=objects, headless=(not GUI), visualize_planning=True)
+
+    # for attr in dir(sink_obj:=sim.get_object('sink')):
+    #     print(attr, getattr(sink_obj,attr))
+    for obj in sim._objects:
+        print(obj.name, obj.scale, obj.bounding_box, obj.get_position_orientation())
     visualize_sim(sim)
 
+    # solution = run_planner(sim, debug=DEBUG, display=True)
+
+    sim.env.close()
 
     
     

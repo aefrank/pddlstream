@@ -32,7 +32,7 @@
         (Cleaned ?o)
         
         ; complex
-        (ValidPath ?path)
+        (ValidPath ?path ?q1 ?q2)
         (ValidCarry ?path ?o ?g)
 
         ; derived
@@ -63,7 +63,7 @@
                             (HandEmpty)
                             (AtConf ?q1)
                             (not (AtConf ?q2))
-                            (ValidPath ?p)
+                            (ValidPath ?p ?q1 ?q2)
                         )
         :effect (and (AtConf ?q2)
                      (not (AtConf ?q1)) )   
@@ -74,7 +74,7 @@
         :precondition (and (Conf ?q1) (Conf ?q2) (Path ?path) (Obj ?o) (Grasp ?g) 
                             (Movable ?o) (Grasping ?o ?g)
                             (AtConf ?q1) (not (AtConf ?q2))
-                            (ValidPath ?path) (ValidCarry ?path ?o ?g) )
+                            (ValidPath ?path ?q1 ?q2) (ValidCarry ?path ?o ?g) )
         :effect (and (AtConf ?q2) (not (AtConf ?q1)) )
     )
 

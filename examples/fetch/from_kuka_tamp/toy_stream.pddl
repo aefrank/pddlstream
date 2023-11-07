@@ -26,14 +26,14 @@
         :inputs (?q1 ?q2)
         :domain (and (Conf ?q1) (Conf ?q2))
         :outputs (?path)
-        :certified (and (Path ?path) (ValidPath ?path))
+        :certified (and (Path ?path) (ValidPath ?path ?q1 ?q2))
     )
     (:stream motion-plan-carry
         :inputs (?q1 ?q2 ?o ?g)
         :domain (and (Conf ?q1) (Conf ?q2) (Obj ?o) (Grasp ?g) 
                     (GraspForObj ?o ?g) (Movable ?o))
         :outputs (?path)
-        :certified (and (Path ?path) (ValidPath ?path) (ValidCarry ?path ?o ?g))
+        :certified (and (Path ?path) (ValidPath ?path ?q1 ?q2) (ValidCarry ?path ?o ?g))
     )
     ; (:stream motion-plan-grasp-and-carry
     ;     :inputs (?q1 ?q2 ?o)

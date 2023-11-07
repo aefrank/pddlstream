@@ -11,7 +11,7 @@ import os, sys, math
 from itertools import product
 import argparse
 
-
+import cv2
 import pybullet as pb
 import numpy as np
 from transforms3d.euler import euler2quat
@@ -247,6 +247,9 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     @property
     def _arm_joint_ids(self) -> List[int]:
         return self._motion_planner.arm_joint_ids
+    @property
+    def _arm_joint_control_indices(self) -> List[int]:
+        return [*self._robot.trunk_control_idx, *self._robot.arm_control_idx[self._robot.default_arm]]
 
     ################################### Initialize Environment #####################################
     # TODO: generalize
@@ -304,11 +307,15 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         self._config = config_data
         return self._config
     
-    def _viewer_setup(self, position:Position=[-0.8, 0.7, 1.7], orientation:Euler=[0.1, -0.9, -0.5]) -> None:
+    def _viewer_setup(self, position:Position=[-0.8, 0.7, 1.7], orientation:Euler=[0.1, -0.9, -0.5], *, keep_viewer_on_top=True) -> None:
         # Set viewer camera 
         self.env.simulator.viewer.initial_pos = position
         self.env.simulator.viewer.initial_view_direction = orientation
         self.env.simulator.viewer.reset_viewer()
+
+        if keep_viewer_on_top:
+            cv2.setWindowProperty("RobotView", cv2.WND_PROP_TOPMOST, 1)
+            cv2.setWindowProperty("Viewer", cv2.WND_PROP_TOPMOST, 1)
         # Note: this was taken from iGibson motion planning example; 
         #       might want to refer to default camera used in pddlstream kuka 
         #       example instead if viewer pose is weird
@@ -363,6 +370,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         self.env.land(self.env.robots[0], position, orientation) # note: this steps sim!
         for robot in self.env.robots:
             robot.tuck() if tuck else robot.untuck()
+            robot.keep_still()
     
     ################################################################################
     ################################################################################   
@@ -426,8 +434,10 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     
     def get_arm_config(self) -> JointPos:
         return self.get_joint_positions(self.robot_bid, self._arm_joint_ids)
-    def set_arm_config(self, q:JointPos, attachments:List[Attachment]=[]) -> None:
+    def set_arm_config(self, q:JointPos, attachments:List[Attachment]=[], freeze=False) -> None:
         self.set_joint_positions(self.robot_bid, self._arm_joint_ids, q)
+        if freeze:
+            self._robot.keep_still()
 
     # ----------------------------------------------------------------------
     
@@ -493,16 +503,8 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     def sample_placement(self, 
                          body:UID, 
                          surface:UID, 
-                         robot:Optional[Union[BaseRobot,UID]]=None
                          ) -> Pose:
-        if robot is None:
-            robot = self._robot
-        elif isinstance(robot, int):
-            robot = self._robots[robot]
-        elif isinstance(robot, str):
-            robot = self.get_object(robot)
-        assert isinstance(robot, BaseRobot)
-
+        robot = self._robot
         obj = self.get_object(body)
 
         with UndoableContext(robot):
@@ -514,7 +516,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 binary_state=True,
                 use_ray_casting_method=True,
                 max_trials=MAX_ATTEMPTS_FOR_SAMPLING_POSE_WITH_OBJECT_AND_PREDICATE,
-                skip_falling=True,
+                skip_falling=False,
                 z_offset=PREDICATE_SAMPLING_Z_OFFSET,
             )
 

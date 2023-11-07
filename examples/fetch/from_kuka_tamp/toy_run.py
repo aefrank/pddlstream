@@ -7,25 +7,29 @@ from json import load
 import os
 import functools as ft
 import inspect as ins
+from time import sleep
+import cv2
 import sys
 from typing_extensions import TypeAlias
 from igibson import object_states
+from igibson.external.pybullet_tools.utils import refine_path, wait_for_user
+from igibson.robots import Fetch
 import numpy as np
 from typing import Any, List, NamedTuple, NamedTuple, NewType, NoReturn, Optional, Tuple, Iterable, Union
-from igibson.tasks.behavior_task import is_mesh_on_surface, is_movable
+from igibson.tasks.behavior_task import enable_real_time, is_mesh_on_surface, is_movable
 
 from igibson.utils.assets_utils import get_all_object_categories, get_ig_model_path, get_object_models_of_category
 from numpy import pi, random
 from transforms3d.euler import quat2euler
-from examples.pybullet.utils.pybullet_tools.utils import Attachment
+from examples.pybullet.utils.pybullet_tools.utils import Attachment, trajectory_controller, wait_for_duration
 from iGibson.igibson.utils.assets_utils import get_ig_avg_category_specs
 
 from igibson.action_primitives.starter_semantic_action_primitives import URDFObject
 from igibson.objects.object_base import BaseObject
 
-from examples.fetch.from_kuka_tamp.fetch_primitives import BID, UID, MyiGibsonSemanticInterface, Object
+from examples.fetch.from_kuka_tamp.fetch_primitives import BID, UID, JointPos, MyiGibsonSemanticInterface, Object
 from examples.fetch.from_kuka_tamp.utils.object_spec import Euler, Kwargs, ObjectSpec, Orientation3D, Position3D, Quaternion
-from examples.pybullet.utils.pybullet_tools.kuka_primitives import Attach, BodyConf, BodyGrasp, BodyPath, BodyPose
+from examples.pybullet.utils.pybullet_tools.kuka_primitives import Attach, BodyConf, BodyGrasp, BodyPose, BodyPath, Command
 from pddlstream.algorithms.meta import create_parser, solve
 from pddlstream.language.constants import PDDLProblem
 from pddlstream.language.generator import from_fn, from_gen_fn, from_test
@@ -133,7 +137,7 @@ class ObjSpec(UserDict):
         # create a new attribute on self; both cases are handled by:
         object.__setattr__(self, attr, value)
             
-        
+
 class ModifiedMiGSI(MyiGibsonSemanticInterface):
 
     @property
@@ -146,6 +150,7 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
     def __init__(self, config_file:str, objects:Iterable[ObjSpec]=[], headless:bool=True, 
                  *, robot_pose:Pose=((0,0,0),(0,0,0)), viewer_pose:Optional[Pose]=None, verbose=True, **config_options:Kwargs):
         self._init_igibson(config=config_file, headless=headless, **config_options)
+        # self._robot.controller_config
         self._load_objects(objects)
         self._init_objects(objects)
         self._init_robot_state(*robot_pose)
@@ -182,10 +187,19 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
                       name:str,
                       position:Position3D=(0,0,0), 
                       orientation:Orientation3D=Euler(0,0,0), 
-                      land:bool=False, 
+                      place_on:Optional[str]=None, 
                       **state:Kwargs) -> None:
-        if land:
-            self.land(name, position, orientation)
+        if place_on is not None:
+            # self.land(name, position, orientation)
+            obj = self.get_object(name)
+            surface = self.get_object(place_on)
+
+            # position, orientation = self.sample_placement(name, place_on)
+            # print(position)
+            self.land(obj, position, orientation)
+            # print(position)
+
+            print(obj.states[object_states.OnTop].get_value(surface)) #, use_ray_casting_method=True)
         else:
             self.set_position_orientation(name, position, orientation)
         if not state=={}:
@@ -218,7 +232,64 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
 
 
 
-def init_sim(objects, headless=True, **kwargs):
+
+class ArmCommand(Command):
+
+    def control(self, real_time=False, dt=0.05, verbose=False):
+        for body_path in self.body_paths:
+            body_path.control(real_time=real_time, dt=dt) #, verbose=verbose)
+
+    
+    def execute(self, time_step=0.05):
+        sim = self.body_paths[0].sim
+        for i, body_path in enumerate(self.body_paths):
+            for q in body_path.iterator():
+                wait_for_duration(time_step)
+
+class ArmPath(BodyPath):
+    def __init__(self, sim:ModifiedMiGSI, path:Iterable[JointPos], attachments:List[Attachment]=[]):
+        super().__init__(sim.robot_bid, path, sim._arm_joint_ids, attachments)
+        self.sim = sim
+
+    # def executor(self): # more accurate name
+    def iterator(self):
+        for configuration in self.path:
+            self.sim.set_arm_config(configuration, self.attachments)
+            self.sim.env.simulator.sync()
+            yield configuration
+
+    def refine(self, num_steps=0, update=False):
+        refined_path = self.__class__(self.sim, refine_path(self.body, self.joints, self.path, num_steps), self.attachments)
+        if update:
+            self.path = refined_path
+        return refined_path
+    
+    # def control(self, real_time=False, dt=0.05, verbose=False):
+    #     for configuration in self.path:
+            
+    #         for q in trajectory_controller(self.body, self.joints, self.path):
+    #             self.sim.env.simulator_step()
+
+            # action = np.zeros(self.sim.env.action_space.shape)
+            # action[4:12] = configuration
+
+            # q = self.sim.get_arm_config()
+            # while not np.allclose(q, configuration, atol=1e-3, rtol=0):
+            #     state, reward, done, x = self.sim.env.step(action)
+            #     q = self.sim.get_arm_config()
+            # self.sim.env.simulator.step()
+            # wait_for_duration(dt)
+
+            # if verbose:
+            #     print('Action:', [x for x in action])
+            #     print('Config:', self.sim.get_arm_config())
+            #     print()
+    
+
+
+
+
+def init_sim(objects, headless=True, **kwargs) -> ModifiedMiGSI:
     
     dir_path = os.path.dirname(os.path.realpath(__file__))
     config = "fetch_tamp.yaml"
@@ -245,7 +316,9 @@ def init_sim(objects, headless=True, **kwargs):
     return sim
 
 ##############################################################################
-def motion_plan(sim:ModifiedMiGSI, q1, q2, o=None, g=None):
+
+
+def motion_plan(sim:ModifiedMiGSI, q1, q2, o=None, g=None, as_tuple=False):
     if isinstance(q1,BodyConf): q1 = q1.configuration
     if isinstance(q2,BodyConf): q2 = q2.configuration
     if o is not None:
@@ -253,19 +326,20 @@ def motion_plan(sim:ModifiedMiGSI, q1, q2, o=None, g=None):
         attachments = [g.attachment()]
     else:
         attachments=[]
-    return (BodyPath(sim.robot_bid, sim.plan_arm_joint_motion(q1,q2,attachments=attachments)),)
+    path = ArmPath(sim, sim.plan_arm_joint_motion(q1,q2,attachments=attachments), attachments)
+    return path if not as_tuple else (path,)
 
-def plan_grasp_and_carry(sim:ModifiedMiGSI, q1, q2, obj, g):
+def plan_grasp_and_carry(sim:ModifiedMiGSI, q1, q2, obj, g, as_tuple=False):
     if isinstance(q1,BodyConf): q1 = q1.configuration
     if isinstance(q2,BodyConf): q2 = q2.configuration
     # grasp = next(sim.get_grasp_gen()(obj))[0]
-    attachment = g.attachment()
-    path = BodyPath(sim.robot_bid, sim.plan_arm_joint_motion(q1,q2,attachments=[attachment]))
-    return(path,)
+    attachments = [g.attachment()]
+    path = ArmPath(sim, sim.plan_arm_joint_motion(q1,q2,attachments=attachments), attachments)
+    return path if not as_tuple else (path,)
 
 
 
-def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Optional[Union[float,BodyConf]]=None):
+def get_pddlproblem(sim:ModifiedMiGSI, q_init:Optional[Union[float,BodyConf]], q_goal:Union[float,BodyConf], verbose=True):
     if q_init is None:                     
         q_init = BodyConf(sim.robot_bid, sim.get_arm_config())
     else:
@@ -274,6 +348,12 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
             q_init = BodyConf(sim.robot_bid, q_init)
     if not isinstance(q_goal, BodyConf): 
         q_goal = BodyConf(sim.robot_bid, q_goal)
+
+    if verbose:
+        print()
+        print('Initial configuration: ', q_init.configuration)
+        print('Goal configuration: ', q_goal.configuration)
+        print()
 
     # objects  = [sim.get_bid(obj) for obj in sim.objects]
 
@@ -302,32 +382,32 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
                             init += [('Placement', pose, sbj, _obj)]
 
 
-    # goal = ('AtConf', q_goal)
+    goal = ('AtConf', q_goal)
     # goal = ('Holding', 'celery')
     # goal = ('On', 'celery', 'stove')
-    goal = ('Cooked', 'radish')
+    # goal = ('Cooked', 'radish')
 
-    print(f"\n\nINITIAL STATE")
-    for fluent in init:
-        fluent = tuple(
-            (sim.get_name(arg) if isinstance(arg,int) else 
-             tuple(np.round(arg.configuration,3)) if isinstance(arg,BodyConf) else 
-             (sim.get_name(arg.body), *(tuple(np.round(p,3)) for p in arg.pose)) if isinstance(arg, BodyPose) else 
-             arg) for arg in fluent
-        )
+    if verbose:
+        print(f"\n\nINITIAL STATE")
+        for fluent in init:
+            fluent = tuple(
+                (sim.get_name(arg) if isinstance(arg,int) else 
+                tuple(np.round(arg.configuration,3)) if isinstance(arg,BodyConf) else 
+                (sim.get_name(arg.body), *(tuple(np.round(p,3)) for p in arg.pose)) if isinstance(arg, BodyPose) else 
+                arg) for arg in fluent
+            )
 
-        print(fluent)
-    print('\n')
+            print(fluent)
+        print('\n')
 
 
     domain_pddl = read(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toy_domain.pddl'))
     constant_map = {}
-    stream_pddl =  read(os.path.join(os.path.dirname(os.path.
-    realpath(__file__)), 'toy_stream.pddl'))
+    stream_pddl =  read(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toy_stream.pddl'))
     
     sample_arm_config = sim.sample_arm_config
-    motion_planner = ft.partial(motion_plan, sim)
-    carry_planner = ft.partial(plan_grasp_and_carry, sim)
+    motion_planner = ft.partial(motion_plan, sim, as_tuple=True)
+    carry_planner = ft.partial(plan_grasp_and_carry, sim, as_tuple=True)
     stream_map = {
         'sample-conf' : from_fn(sample_arm_config),
         'is-surface' : from_test(sim.is_surface),
@@ -342,22 +422,18 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_goal:Union[float,BodyConf], q_init:Opti
     return problem
 
 
-def run_planner(sim:ModifiedMiGSI, debug:bool=False, display:bool=True):
+def run_planner(sim:ModifiedMiGSI, qgoal:Optional[Union[float,BodyConf]]=None, debug:bool=False, print_results:bool=True):
     qinit = sim.get_arm_config()
-    if debug: 
-        qgoal = (0.12424097874999764, 1.3712678552985822, -0.3116053947850258, 2.62593026717931, 1.190838900298941, 0.2317687545849476, 1.0115493242626759, -1.2075981800730915) # avoid spending time sampling during debugging
-    else:
-        qgoal = sim.sample_arm_config(max_attempts=100)
-    print(qinit)
-    print(qgoal)
-
-    plan = motion_plan(sim, qinit, qgoal)
-    print('motion plan length:', len(plan))
-    print('\n\n\n')
+    if qgoal is None: 
+        # qgoal = np.array(qinit) + np.array([0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        qgoal = sim._robot.tucked_default_joint_pos[sim._arm_joint_control_indices]
+        # qgoal =  (0.385, -1.06595, -0.22184, 1.53448, 1.46076, -0.84995, 1.36904, 1.90996)
+        # qgoal = (0.237, -0.957, -0.212, -2.493, 1.488, -0.736, -1.562, -2.875)
+        # qgoal = (0.12424097874999764, 1.3712678552985822, -0.3116053947850258, 2.62593026717931, 1.190838900298941, 0.2317687545849476, 1.0115493242626759, -1.2075981800730915) 
 
     problem = get_pddlproblem(sim, qinit, qgoal)
     solution = solve(problem, unit_costs=True, debug=debug)
-    if display:
+    if print_results:
         print(solution)
         print('\n\n')
         for fluent in solution.certificate.all_facts:
@@ -369,26 +445,38 @@ def run_planner(sim:ModifiedMiGSI, debug:bool=False, display:bool=True):
             )
 
             print(fluent)
+    return solution
+
+def consolidate_plan(plan):
+    paths = []
+    for name, args in plan:
+        if name == 'place':
+            paths += args[-1].reverse().body_paths
+        elif name in ['move', 'move_free', 'move_holding', 'pick']:
+            action = args[-1]
+            if isinstance(action, Command):
+                paths += action.body_paths
+            elif isinstance(action, ArmPath):
+                paths += [action]
+            else:
+                raise NotImplementedError(f"no handling implemented for action ({name} {args}) with args[-1] of type {type(args[-1])}")
+    return ArmCommand(paths)
 
 def visualize_sim(sim:ModifiedMiGSI):
     sim.env.simulator.viewer.reset_viewer()
 
     while True:
+        sim.env.simulator.sync()
         action = np.zeros(sim.env.action_space.shape)
         state, reward, done, x = sim.env.step(action)
+        # cv2.setWindowProperty("RobotView", cv2.WND_PROP_TOPMOST, 1)
+        # cv2.setWindowProperty("Viewer", cv2.WND_PROP_TOPMOST, 1)
         # print(state, reward, done, x)
         # print(sim.get_pose('stove'))
         # print(sim.get_object('stove').states[object_states.AABB].get_value())
 
 
-def main():
-    parser = create_parser()
-    parser.add_argument('-g','--gui', action='store_true', help='Render and visualize the system')
-    args = parser.parse_args()
-
-    DEBUG = True
-    GUI = args.gui if (gui_env_var:=os.getenv("USE_GUI")) is None else gui_env_var
-
+def get_objects():
     counter = ObjSpec("counter", "countertop", model='counter_0',
                       position=(-2.35,  4.95,  0.35),
                     #   position=(-2.36734748,  5.5552516 ,  0.45443946),
@@ -417,22 +505,119 @@ def main():
                      bounding_box=(1.0,  0.75,  1.25),
                     )
     celery = ObjSpec("celery", "celery", model='celery_000', 
-                     position=(-2.3,  5.1,  1.0), land=True, fixed_base=False, scale=0.15)
+                     position=(-2.3,  5.1,  1.0), place_on='counter', fixed_base=False, scale=0.15)
     radish = ObjSpec("radish", "radish", model='45_0', 
-                     position=(-2.15,  5.3,  1.0), land=True, fixed_base=False, scale=1.25)
-    objects = [sink, stove, counter, celery, radish]
+                     position=(-2.15,  5.3,  1.0), place_on='counter', fixed_base=False, scale=1.25)
+    
+    return sink, stove, counter, celery, radish
 
-    sim = init_sim(objects=objects, headless=(not GUI), visualize_planning=True)
+class MyFetch(Fetch):
 
-    # for attr in dir(sink_obj:=sim.get_object('sink')):
-    #     print(attr, getattr(sink_obj,attr))
-    for obj in sim._objects:
-        print(obj.name, obj.scale, obj.bounding_box, obj.get_position_orientation())
-    visualize_sim(sim)
+    @property
+    def _default_controllers(self):
+        # Always call super first
+        controllers = super()._default_controllers
 
-    # solution = run_planner(sim, debug=DEBUG, display=True)
+        # We use multi finger gripper, differential drive, and IK controllers as default
+        controllers["base"] = "DifferentialDriveController"
+        controllers["camera"] = "JointController"
+        controllers["arm_{}".format(self.default_arm)] = "JointController"
+        controllers["gripper_{}".format(self.default_arm)] = "MultiFingerGripperController"
 
-    sim.env.close()
+        return controllers
+
+    @property
+    def _default_controller_config(self):
+        # Grab defaults from super method first
+        cfg = super()._default_controller_config
+
+        # Use default IK controller -- also need to override joint idx being controlled to include trunk in default
+        # IK arm controller
+        cfg["arm_{}".format(self.default_arm)]["JointController"]["joint_idx"] = np.concatenate(
+            [self.trunk_control_idx, self.arm_control_idx[self.default_arm]]
+        )
+
+        # If using rigid trunk, we also clamp its limits
+        if self.rigid_trunk:
+            cfg["arm_{}".format(self.default_arm)]["JointController"]["control_limits"]["position"][0][
+                self.trunk_control_idx
+            ] = self.untucked_default_joint_pos[self.trunk_control_idx]
+            cfg["arm_{}".format(self.default_arm)]["JointController"]["control_limits"]["position"][1][
+                self.trunk_control_idx
+            ] = self.untucked_default_joint_pos[self.trunk_control_idx]
+
+        return cfg
+
+
+def main():
+    parser = create_parser()
+    parser.add_argument('-g','--gui', action='store_true', help='Render and visualize the system')
+    args = parser.parse_args()
+
+    DEBUG = True
+    SIMULATE = True
+    GUI = args.gui if (gui_env_var:=os.getenv("GUI")) is None else gui_env_var
+    if GUI:
+        print("Visualization on.")
+
+    sim = init_sim(objects=[], # get_objects(), 
+                   headless=(not GUI), 
+                   visualize_planning=True)
+    try:
+        qinit = sim._robot.tucked_default_joint_pos[sim._arm_joint_control_indices]
+        qgoal = sim._robot.untucked_default_joint_pos[sim._arm_joint_control_indices]
+        # qgoal = (0.12424097874999764, 1.3712678552985822, -0.3116053947850258, 2.62593026717931, 1.190838900298941, 0.2317687545849476, 1.0115493242626759, -1.2075981800730915) 
+
+        sim.set_arm_config(qinit)
+        sim.env.simulator.viewer.initial_pos = [-1.9, 5.1, 1,1]
+        sim.env.simulator.viewer.initial_view_direction = [0.6, 0.6, -0.4]
+        sim.env.simulator.viewer.reset_viewer()
+        sim.env.simulator.sync()
+
+
+        solution = run_planner(sim, 
+                               qgoal=qgoal,
+                            #    debug=DEBUG, 
+                               print_results=True
+                            )
+        plan = solution.plan
+
+        # if GUI:
+        #     visualize_sim(sim)
+
+
+        
+
+        if (plan is not None) and GUI:
+            command = consolidate_plan(plan)
+
+            path = plan[0].args[-1].path
+            [print(q) for q in path[-5:]]
+            print()
+            
+            if SIMULATE:
+                wait_for_user('Simulate?')
+                command.control()
+            else:
+                wait_for_user('Execute?')
+                #command.step()
+                # command.refine(num_steps=10).execute(time_step=0.001)
+                command.refine(num_steps=10).execute(time_step=0.001)
+            print("Config: ", sim.get_arm_config())
+            wait_for_user('Show qgoal?')
+            sim.set_arm_config(qgoal, freeze=True)
+            print("Config: ", sim.get_arm_config())
+            sim.env.simulator.step()
+            print()
+            print(path[0])
+            print(path[-1])
+            print()
+            print("Press 'esc' on Viewer window to exit.")
+            while True:
+                sim.env.simulator.step()
+
+    finally:
+        sim.env.close()
 
     
     

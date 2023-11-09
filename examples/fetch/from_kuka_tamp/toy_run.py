@@ -264,19 +264,15 @@ class ArmPath(BodyPath):
             self.path = refined_path
         return refined_path
     
-    # def control(self, real_time=False, dt=0.05, verbose=False):
-    #     for configuration in self.path:
-            
-    #         for q in trajectory_controller(self.body, self.joints, self.path):
-    #             self.sim.env.simulator_step()
+    def control(self, real_time=False, dt=0.05, verbose=False):
+        for configuration in self.path:
+            action = np.zeros(self.sim.env.action_space.shape)
+            action[4:12] = configuration
 
-            # action = np.zeros(self.sim.env.action_space.shape)
-            # action[4:12] = configuration
-
-            # q = self.sim.get_arm_config()
-            # while not np.allclose(q, configuration, atol=1e-3, rtol=0):
-            #     state, reward, done, x = self.sim.env.step(action)
-            #     q = self.sim.get_arm_config()
+            q = self.sim.get_arm_config()
+            while not np.allclose(q, configuration, atol=1e-3, rtol=0):
+                state, reward, done, x = self.sim.env.step(action)
+                q = self.sim.get_arm_config()
             # self.sim.env.simulator.step()
             # wait_for_duration(dt)
 
@@ -555,7 +551,8 @@ def main():
     args = parser.parse_args()
 
     DEBUG = True
-    SIMULATE = True
+    USE_CONTROLLERS = False  
+    REFINE_PATH = False  
     GUI = args.gui if (gui_env_var:=os.getenv("GUI")) is None else gui_env_var
     if GUI:
         print("Visualization on.")
@@ -569,7 +566,7 @@ def main():
         # qgoal = (0.12424097874999764, 1.3712678552985822, -0.3116053947850258, 2.62593026717931, 1.190838900298941, 0.2317687545849476, 1.0115493242626759, -1.2075981800730915) 
 
         sim.set_arm_config(qinit)
-        sim.env.simulator.viewer.initial_pos = [-1.9, 5.1, 1,1]
+        sim.env.simulator.viewer.initial_pos = [-2.2, 4.8, 1.5]
         sim.env.simulator.viewer.initial_view_direction = [0.6, 0.6, -0.4]
         sim.env.simulator.viewer.reset_viewer()
         sim.env.simulator.sync()
@@ -595,14 +592,17 @@ def main():
             [print(q) for q in path[-5:]]
             print()
             
-            if SIMULATE:
+            if USE_CONTROLLERS:
                 wait_for_user('Simulate?')
                 command.control()
             else:
                 wait_for_user('Execute?')
-                #command.step()
-                # command.refine(num_steps=10).execute(time_step=0.001)
-                command.refine(num_steps=10).execute(time_step=0.001)
+                dt = 1e-3
+                if REFINE_PATH:
+                    factor=10
+                    command = command.refine(num_steps=factor)
+                    dt /= factor
+                command.execute(time_step=dt)
             print("Config: ", sim.get_arm_config())
             wait_for_user('Show qgoal?')
             sim.set_arm_config(qgoal, freeze=True)
@@ -612,7 +612,7 @@ def main():
             print(path[0])
             print(path[-1])
             print()
-            print("Press 'esc' on Viewer window to exit.")
+            print("Press 'Ctrl+C' in terminal or 'esc' in Viewer window to exit.")
             while True:
                 sim.env.simulator.step()
 

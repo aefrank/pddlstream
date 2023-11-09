@@ -27,7 +27,7 @@ from iGibson.igibson.utils.assets_utils import get_ig_avg_category_specs
 from igibson.action_primitives.starter_semantic_action_primitives import URDFObject
 from igibson.objects.object_base import BaseObject
 
-from examples.fetch.from_kuka_tamp.fetch_primitives import BID, UID, JointPos, MyiGibsonSemanticInterface, Object
+from examples.fetch.from_kuka_tamp.fetch_primitives import BID, UID, JointPos, MyiGibsonSemanticInterface, Object, _sync_viewer_after_exec
 from examples.fetch.from_kuka_tamp.utils.object_spec import Euler, Kwargs, ObjectSpec, Orientation3D, Position3D, Quaternion
 from examples.pybullet.utils.pybullet_tools.kuka_primitives import Attach, BodyConf, BodyGrasp, BodyPose, BodyPath, Command
 from pddlstream.algorithms.meta import create_parser, solve
@@ -149,9 +149,9 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
 
     def __init__(self, config_file:str, objects:Iterable[ObjSpec]=[], headless:bool=True, 
                  *, robot_pose:Pose=((0,0,0),(0,0,0)), viewer_pose:Optional[Pose]=None, verbose=True, **config_options:Kwargs):
+        self.has_gui = not headless
         self._init_igibson(config=config_file, headless=headless, **config_options)
-        # self._robot.controller_config
-        self._load_objects(objects)
+        # self._load_objects(objects)
         self._init_objects(objects)
         self._init_robot_state(*robot_pose)
         if not headless:
@@ -196,21 +196,23 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
 
             # position, orientation = self.sample_placement(name, place_on)
             # print(position)
-            self.land(obj, position, orientation)
+            self.land(obj, position, orientation, _sync_viewer=False)
             # print(position)
 
             print(obj.states[object_states.OnTop].get_value(surface)) #, use_ray_casting_method=True)
         else:
-            self.set_position_orientation(name, position, orientation)
+            self.set_position_orientation(name, position, orientation, _sync_viewer=False)
         if not state=={}:
             raise NotImplementedError(f"No handling defined for state variables {list(state)}")
     
     def _init_objects(self, specs:Iterable[ObjSpec]) -> None:
+        self._load_objects(specs)
+        
         pose = self.get_pose(self.robot)
-        self.set_position(self.robot, (100,100,100))
+        self.set_position(self.robot, (100,100,100), _sync_viewer=False)
         for spec in specs:
             self._init_object_statevars(spec.name, **spec.state)
-        self.set_pose(self.robot, pose)
+        self.set_pose(self.robot, pose, _sync_viewer=False)
     
     def _init_object_state(self, obj_specs: Iterable[ObjectSpec], *, verbose=True) -> None:
         raise NotImplementedError
@@ -219,8 +221,9 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
     def is_surface(self, obj:UID):
         return not self.is_movable(obj) and (self.get_object(obj).category.lower() not in ['walls', 'ceilings'])
     
+    @_sync_viewer_after_exec
     def land(self, obj:Object, position:Optional[Position3D]=None, orientation:Optional[Orientation3D]=None):
-        if position is None:    position = self.get_position(obj)
+        if position is None:    position    = self.get_position(obj)
         if orientation is None: orientation = self.get_orientation(obj)
         if len(orientation)==4: orientation = quat2euler(orientation)
 
@@ -255,7 +258,6 @@ class ArmPath(BodyPath):
     def iterator(self):
         for configuration in self.path:
             self.sim.set_arm_config(configuration, self.attachments)
-            self.sim.env.simulator.sync()
             yield configuration
 
     def refine(self, num_steps=0, update=False):
@@ -418,17 +420,17 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_init:Optional[Union[float,BodyConf]], q
     return problem
 
 
-def run_planner(sim:ModifiedMiGSI, qgoal:Optional[Union[float,BodyConf]]=None, debug:bool=False, print_results:bool=True):
-    qinit = sim.get_arm_config()
+def run_planner(sim:ModifiedMiGSI, 
+                qinit:Optional[Union[float,BodyConf]]=None, 
+                qgoal:Optional[Union[float,BodyConf]]=None, 
+                debug:bool=False, 
+                print_results:bool=True ):
     if qgoal is None: 
-        # qgoal = np.array(qinit) + np.array([0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         qgoal = sim._robot.tucked_default_joint_pos[sim._arm_joint_control_indices]
-        # qgoal =  (0.385, -1.06595, -0.22184, 1.53448, 1.46076, -0.84995, 1.36904, 1.90996)
-        # qgoal = (0.237, -0.957, -0.212, -2.493, 1.488, -0.736, -1.562, -2.875)
-        # qgoal = (0.12424097874999764, 1.3712678552985822, -0.3116053947850258, 2.62593026717931, 1.190838900298941, 0.2317687545849476, 1.0115493242626759, -1.2075981800730915) 
 
     problem = get_pddlproblem(sim, qinit, qgoal)
     solution = solve(problem, unit_costs=True, debug=debug)
+
     if print_results:
         print(solution)
         print('\n\n')
@@ -441,6 +443,7 @@ def run_planner(sim:ModifiedMiGSI, qgoal:Optional[Union[float,BodyConf]]=None, d
             )
 
             print(fluent)
+
     return solution
 
 def consolidate_plan(plan):
@@ -559,20 +562,22 @@ def main():
 
     sim = init_sim(objects=[], # get_objects(), 
                    headless=(not GUI), 
-                   visualize_planning=True)
+                   visualize_planning=True,
+                   viewer_pose=([-2.2, 4.8, 1.5], [0.6, 0.6, -0.4]))
     try:
         qinit = sim._robot.tucked_default_joint_pos[sim._arm_joint_control_indices]
         qgoal = sim._robot.untucked_default_joint_pos[sim._arm_joint_control_indices]
         # qgoal = (0.12424097874999764, 1.3712678552985822, -0.3116053947850258, 2.62593026717931, 1.190838900298941, 0.2317687545849476, 1.0115493242626759, -1.2075981800730915) 
 
-        sim.set_arm_config(qinit)
-        sim.env.simulator.viewer.initial_pos = [-2.2, 4.8, 1.5]
-        sim.env.simulator.viewer.initial_view_direction = [0.6, 0.6, -0.4]
-        sim.env.simulator.viewer.reset_viewer()
-        sim.env.simulator.sync()
+        # sim.set_arm_config(qinit)
+        # sim.env.simulator.viewer.initial_pos = [-2.2, 4.8, 1.5]
+        # sim.env.simulator.viewer.initial_view_direction = [0.6, 0.6, -0.4]
+        # sim.env.simulator.viewer.reset_viewer()
+        # sim.env.simulator.sync()
 
 
         solution = run_planner(sim, 
+                               qinit=qinit,
                                qgoal=qgoal,
                             #    debug=DEBUG, 
                                print_results=True

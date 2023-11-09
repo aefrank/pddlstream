@@ -17,12 +17,13 @@ from igibson.external.pybullet_tools.utils import refine_path, wait_for_user
 from igibson.robots import Fetch
 from igibson.utils.motion_planning_wrapper import MotionPlanningWrapper
 import numpy as np
-from typing import Any, List, NamedTuple, NamedTuple, NewType, NoReturn, Optional, Tuple, Iterable, Union
+from typing import Any, Callable, List, NamedTuple, NamedTuple, NewType, NoReturn, Optional, Tuple, Iterable, Union
 from igibson.tasks.behavior_task import enable_real_time, is_mesh_on_surface, is_movable
 
 from igibson.utils.assets_utils import get_all_object_categories, get_ig_model_path, get_object_models_of_category
 from numpy import pi, random
 from transforms3d.euler import quat2euler
+from examples.fetch.from_kuka_tamp.utils.utils import PybulletToolsVersion
 from examples.pybullet.utils.pybullet_tools.utils import Attachment, trajectory_controller, wait_for_duration
 from iGibson.igibson.utils.assets_utils import get_ig_avg_category_specs
 
@@ -31,7 +32,7 @@ from igibson.objects.object_base import BaseObject
 
 from examples.fetch.from_kuka_tamp.fetch_primitives import BID, UID, JointPos, MyiGibsonSemanticInterface, Object, _sync_viewer_after_exec
 from examples.fetch.from_kuka_tamp.utils.object_spec import Euler, Kwargs, ObjectSpec, Orientation3D, Position3D, Quaternion
-from examples.pybullet.utils.pybullet_tools.kuka_primitives import Attach, BodyConf, BodyGrasp, BodyPose, BodyPath, Command
+from examples.pybullet.utils.pybullet_tools.kuka_primitives import ApplyForce, Attach, BodyConf, BodyGrasp, BodyPose, BodyPath, Command
 from pddlstream.algorithms.meta import create_parser, solve
 from pddlstream.language.constants import PDDLProblem
 from pddlstream.language.generator import from_fn, from_gen_fn, from_test
@@ -246,7 +247,58 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
         self.env.land(obj, position, orientation)
 
 
+    ###############################################################
 
+    def plan_arm_joint_motion(self, q1:JointPos, q2:JointPos, 
+                              obstacles:Optional[List[int]] = None, attachments:List[Attachment] = ..., 
+                              **kwargs:Kwargs):
+        if obstacles is None:
+            obstacles = [obj for obj in self._objects if not self.is_movable(obj)]
+        return super().plan_arm_joint_motion(
+            q1, 
+            q2, 
+            obstacles, 
+            attachments, 
+            **kwargs
+        )
+
+    def get_grasp_gen(self):
+        grasps = super().get_grasp_gen()
+        def gen(body:UID):
+            grasp_gen= grasps(body)
+            for grasp, *_ in grasp_gen:
+                out = (grasp, BodyPose(self.robot_bid, grasp.approach_pose), BodyPose(self.robot_bid, grasp.grasp_pose))
+                yield out
+        return gen
+
+    def get_grasp_traj_fn(self, num_attempts: int = 10) -> Callable[[str, BodyGrasp], Tuple[JointPos, Command]]:
+        calculate_grasp_command = super().get_grasp_traj_fn(num_attempts)
+        @ft.wraps(calculate_grasp_command)
+        def wrapper(target:UID, grasp:BodyGrasp):
+            try:
+                out = calculate_grasp_command(target, grasp)
+                if out is not None:
+                    conf = BodyConf(body=self.robot_bid, joints=self._arm_joint_ids, configuration=out[0])
+                    command = ArmCommand(body_paths=[ 
+                            ArmPath(self, path.path, path.attachments) if isinstance(path,BodyPath) else
+                            path for path in out[1].body_paths
+                    ])
+                    out = (conf, command)
+                return out
+            except (TypeError, AssertionError):
+                return None
+        return wrapper
+    
+    def arm_fk(self, q):
+        pose = super().arm_fk(q)
+        return (BodyPose(self.robot_bid, pose),)
+
+
+
+class ArmConf(BodyConf):
+    def __init__(self, sim:ModifiedMiGSI, configuration:JointPos):
+        super().__init__(body=sim.robot_bid, joints=sim._arm_joint_ids, configuration=configuration)
+        self.sim = sim
 
 
 class ArmCommand(Command):
@@ -257,8 +309,11 @@ class ArmCommand(Command):
 
     def execute(self, time_step=0.05, step_sim=False):
         for i, body_path in enumerate(self.body_paths):
-            for q in body_path.iterator(step_sim=step_sim):
-                wait_for_duration(time_step)
+            if isinstance(body_path, ApplyForce):
+                body_path.control()
+            else:
+                for q in body_path.iterator(step_sim=step_sim):
+                    wait_for_duration(time_step)
 
 class ArmPath(BodyPath):
     def __init__(self, sim:ModifiedMiGSI, path:Iterable[JointPos], attachments:List[Attachment]=[]):
@@ -400,8 +455,8 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_init:Optional[Union[float,BodyConf]], q
                             init += [('Placement', pose, sbj, _obj)]
 
 
-    goal = ('AtConf', q_goal)
-    # goal = ('Holding', 'celery')
+    # goal = ('AtConf', q_goal)
+    goal = ('Holding', 'radish')
     # goal = ('On', 'celery', 'stove')
     # goal = ('Cooked', 'radish')
 
@@ -431,8 +486,11 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_init:Optional[Union[float,BodyConf]], q
         'is-surface' : from_test(sim.is_surface),
         'sample-placement' : from_gen_fn(sim.get_stable_gen()),
         'sample-grasp' : from_gen_fn(sim.get_grasp_gen()),
+        'grasp-command' : from_fn(sim.get_grasp_traj_fn()),
         'motion-plan' : from_fn(motion_planner),
-        'motion-plan-carry' : from_fn(carry_planner),
+        # 'motion-plan-carry' : from_fn(carry_planner),
+        'forward-kinematics' : from_fn(sim.arm_fk),
+        'inverse-kinematics' : from_fn(sim.arm_ik),
     }
 
 
@@ -444,15 +502,15 @@ def run_planner(sim:ModifiedMiGSI,
                 qinit:Optional[Union[float,BodyConf]]=None, 
                 qgoal:Optional[Union[float,BodyConf]]=None, 
                 debug:bool=False, 
-                print_results:bool=True ):
+                print_results:bool=True):
     if qgoal is None: 
         qgoal = sim._robot.tucked_default_joint_pos[sim._arm_joint_control_indices]
 
     problem = get_pddlproblem(sim, qinit, qgoal)
-    solution = solve(problem, unit_costs=True, debug=debug)
+    solution = solve(problem, unit_costs=True, verbose=debug, debug=debug)
 
     if print_results:
-        print(solution)
+        print(solution.plan)
         print('\n\n')
         for fluent in solution.certificate.all_facts:
             fluent = tuple(
@@ -568,23 +626,28 @@ class MyFetch(Fetch):
         return cfg
 
 
-def get_macros(*, gui=None, debug=False, use_controllers=False, refine_path=False):
+def decide_gui(*, force:bool=None):
+    if force is not None:
+        return force
+    
     parser = create_parser()
     parser.add_argument('-g','--gui', action='store_true', help='Render and visualize the system')
     args = parser.parse_args()
 
-    if gui is None:
-        gui = args.gui if (gui_env_var:=os.getenv("GUI")) is None else gui_env_var
+    gui = args.gui if (gui_env_var:=os.getenv("GUI")) is None else gui_env_var
     if gui:
         print("Visualization on.")
-
-        return gui, debug, use_controllers, refine_path
+    
+    return gui
 
 
 
 def main():
-    GUI, DEBUG, USE_CONTROLLERS, REFINE_PATH = get_macros()
-
+    GUI = decide_gui()
+    DEBUG = False
+    USE_CONTROLLERS = False
+    REFINE_PATH = False
+    
     sim = init_sim(
         objects=get_objects(), 
         headless=(not GUI), 
@@ -595,15 +658,17 @@ def main():
 
     try:
         qinit = sim._robot.tucked_default_joint_pos[sim._arm_joint_control_indices]
-        qgoal = sim._robot.untucked_default_joint_pos[sim._arm_joint_control_indices]
+        # qgoal = sim._robot.untucked_default_joint_pos[sim._arm_joint_control_indices]
+        qgoal = sim.as_arm_config(sim.get_position('radish'))
 
         solution = run_planner(sim, 
                                qinit=qinit,
                                qgoal=qgoal,
-                            #    debug=DEBUG, 
-                               print_results=True
+                               debug=DEBUG, 
+                               print_results=False
                             )
         plan = solution.plan
+        print(plan, '\n')
 
         # if GUI:
         #     visualize_sim(sim)
@@ -620,8 +685,29 @@ def main():
                 dt = sim.env.simulator.render_timestep
                 if REFINE_PATH:
                     factor=10
-                    command = command.refine(num_steps=factor)
                     dt /= factor
+
+                # for action in plan:
+                #     name, *args = action
+                #     if  name == 'pick':
+                #         obj, grasp, approach_pose, action_path = args
+                        
+                        
+                        
+                #     elif name == 'place':
+                #         paths += args[-1].reverse().body_paths
+                #     elif name in ['move', 'move_free', 'move_holding', 'pick']:
+                #         path = args[-1]
+                #         if isinstance(path, Command):
+                #             paths += path.body_paths
+                #         elif isinstance(path, ArmPath):
+                #             paths += [path]
+                #         else:
+                #             raise NotImplementedError(f"no handling implemented for action ({name} {args}) with args[-1] of type {type(args[-1])}")
+                #     if name == 'move':
+
+                    if REFINE_PATH:
+                        command = command.refine(num_steps=factor)
                 command.execute(time_step=dt, step_sim=True)
 
             print("Config: ", sim.get_arm_config())

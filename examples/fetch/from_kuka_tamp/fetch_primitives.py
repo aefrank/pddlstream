@@ -475,6 +475,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     
     @_sync_viewer_after_exec
     def set_arm_config(self, q:JointPos, attachments:List[Attachment]=[], freeze=False) -> None:
+        if isinstance(q,BodyConf): q = q.configuration
         self.set_joint_positions(self.robot_bid, self._arm_joint_ids, q)
         if freeze:
             self._robot.keep_still()
@@ -1073,7 +1074,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
 
     def get_grasp_traj_fn(self, num_attempts:int=10) -> Callable[[str,BodyGrasp],Tuple[JointPos,Command]]:
-        joint_ids = self._motion_planner.arm_joint_ids
+        joint_ids = self._arm_joint_ids
         max_limits, min_limits, rest_position, joint_range, joint_damping = self._motion_planner.get_ik_parameters()
         
         def calculate_grasp_command(target:UID, grasp:BodyGrasp) -> Tuple[JointPos,Command]:
@@ -1087,14 +1088,15 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             :param target: UID, name or body_id of target object to grasp
             :param grasp: BodyGrasp, grasp info for environment robot grasping target object with poses in world frame. 
             '''
-            with UndoableContext(self._motion_planner.robot):
+            with UndoableContext(self._robot):
                 target_bid = self.get_bid(target)
 
                 # Some sanity checks
                 assert isinstance(grasp, BodyGrasp), f"grasp must be defined as a BodyGrasp object, not {type(grasp)}"
                 assert grasp.robot == self.robot_bid, f"grasp must be defined for robot body ID {self.robot_bid}, not {grasp.robot}" 
                 assert grasp.link == self.eef_link, f"grasp must be defined for eef body ID {self.eef_link}, not {grasp.link}" 
-                assert grasp.body == target_bid, f"grasp must be defined for object body ID {target_bid}, not {grasp.body}"
+                assert grasp.body == target_bid, \
+                    f"grasp must be defined for object body ID {target_bid} ({self.get_name(target_bid)}), not {grasp.body} ({self.get_name(grasp.body)})"
 
                 ### Get joint angles for desired approach and grasp poses
                 approach_position, _ = grasp.approach_pose

@@ -401,7 +401,6 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         self.env.simulator.viewer.initial_pos = position
         self.env.simulator.viewer.initial_view_direction = orientation
         self.env.simulator.viewer.reset_viewer()
-        self.env.simulator.sync()
 
         # This doesn't seem to be working
         if keep_viewer_on_top:

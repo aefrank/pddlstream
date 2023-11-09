@@ -12,8 +12,10 @@ import cv2
 import sys
 from typing_extensions import TypeAlias
 from igibson import object_states
+from igibson.envs.igibson_env import iGibsonEnv
 from igibson.external.pybullet_tools.utils import refine_path, wait_for_user
 from igibson.robots import Fetch
+from igibson.utils.motion_planning_wrapper import MotionPlanningWrapper
 import numpy as np
 from typing import Any, List, NamedTuple, NamedTuple, NewType, NoReturn, Optional, Tuple, Iterable, Union
 from igibson.tasks.behavior_task import enable_real_time, is_mesh_on_surface, is_movable
@@ -147,15 +149,20 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
     def objects(self):
         return [obj.name for obj in self._objects]
 
-    def __init__(self, config_file:str, objects:Iterable[ObjSpec]=[], headless:bool=True, 
+    def __init__(self, config_file:str, objects:Iterable[ObjSpec]=[], headless:bool=True, let_settle:bool=False,
                  *, robot_pose:Pose=((0,0,0),(0,0,0)), viewer_pose:Optional[Pose]=None, verbose=True, **config_options:Kwargs):
         self.has_gui = not headless
         self._init_igibson(config=config_file, headless=headless, **config_options)
-        # self._load_objects(objects)
         self._init_objects(objects)
         self._init_robot_state(*robot_pose)
         if not headless:
             self._viewer_setup(*viewer_pose) if viewer_pose is not None else self._viewer_setup()
+        if let_settle:
+            print("Allowing to settle... ", end="")
+            for _ in range(100):
+                self.step()
+            print("done.")
+
 
     def _load_objects(self, specs:Iterable[ObjSpec], verbose: bool = True) -> List[BID]:
         def load_single_object(spec:ObjSpec):
@@ -199,7 +206,7 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
             self.land(obj, position, orientation, _sync_viewer=False)
             # print(position)
 
-            print(obj.states[object_states.OnTop].get_value(surface)) #, use_ray_casting_method=True)
+            assert obj.states[object_states.OnTop].get_value(surface) #, use_ray_casting_method=True)
         else:
             self.set_position_orientation(name, position, orientation, _sync_viewer=False)
         if not state=={}:
@@ -217,6 +224,12 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
     def _init_object_state(self, obj_specs: Iterable[ObjectSpec], *, verbose=True) -> None:
         raise NotImplementedError
 
+
+    def step(self, *, action:np.ndarray=None):
+        if action is not None:
+            self.env.step(action)
+        else:
+            self.env.simulator.step()
 
     def is_surface(self, obj:UID):
         return not self.is_movable(obj) and (self.get_object(obj).category.lower() not in ['walls', 'ceilings'])
@@ -242,11 +255,9 @@ class ArmCommand(Command):
         for body_path in self.body_paths:
             body_path.control(real_time=real_time, dt=dt) #, verbose=verbose)
 
-    
-    def execute(self, time_step=0.05):
-        sim = self.body_paths[0].sim
+    def execute(self, time_step=0.05, step_sim=False):
         for i, body_path in enumerate(self.body_paths):
-            for q in body_path.iterator():
+            for q in body_path.iterator(step_sim=step_sim):
                 wait_for_duration(time_step)
 
 class ArmPath(BodyPath):
@@ -255,9 +266,13 @@ class ArmPath(BodyPath):
         self.sim = sim
 
     # def executor(self): # more accurate name
-    def iterator(self):
+    def iterator(self, step_sim=False):
         for configuration in self.path:
-            self.sim.set_arm_config(configuration, self.attachments)
+            if step_sim:
+                self.sim.set_arm_config(configuration, self.attachments, _sync_viewer=False)
+                self.sim.step()
+            else:
+                self.sim.set_arm_config(configuration, self.attachments)
             yield configuration
 
     def refine(self, num_steps=0, update=False):
@@ -273,15 +288,20 @@ class ArmPath(BodyPath):
 
             q = self.sim.get_arm_config()
             while not np.allclose(q, configuration, atol=1e-3, rtol=0):
-                state, reward, done, x = self.sim.env.step(action)
+                state, reward, done, x = self.sim.step(action)
                 q = self.sim.get_arm_config()
-            # self.sim.env.simulator.step()
             # wait_for_duration(dt)
 
             # if verbose:
             #     print('Action:', [x for x in action])
             #     print('Config:', self.sim.get_arm_config())
             #     print()
+    
+    def __repr__(self):
+        if self.path is None:
+            return f"{self.__class__.__name__}(None)"
+        else:
+            return super().__repr__() 
     
 
 
@@ -548,33 +568,34 @@ class MyFetch(Fetch):
         return cfg
 
 
-def main():
+def get_macros(*, gui=None, debug=False, use_controllers=False, refine_path=False):
     parser = create_parser()
     parser.add_argument('-g','--gui', action='store_true', help='Render and visualize the system')
     args = parser.parse_args()
 
-    DEBUG = True
-    USE_CONTROLLERS = False  
-    REFINE_PATH = False  
-    GUI = args.gui if (gui_env_var:=os.getenv("GUI")) is None else gui_env_var
-    if GUI:
+    if gui is None:
+        gui = args.gui if (gui_env_var:=os.getenv("GUI")) is None else gui_env_var
+    if gui:
         print("Visualization on.")
 
-    sim = init_sim(objects=[], # get_objects(), 
-                   headless=(not GUI), 
-                   visualize_planning=True,
-                   viewer_pose=([-2.2, 4.8, 1.5], [0.6, 0.6, -0.4]))
+        return gui, debug, use_controllers, refine_path
+
+
+
+def main():
+    GUI, DEBUG, USE_CONTROLLERS, REFINE_PATH = get_macros()
+
+    sim = init_sim(
+        objects=get_objects(), 
+        headless=(not GUI), 
+        let_settle=True,
+        viewer_pose=([-2.2, 4.8, 1.5], [0.6, 0.6, -0.4]),
+        visualize_planning=True,
+    )
+
     try:
         qinit = sim._robot.tucked_default_joint_pos[sim._arm_joint_control_indices]
         qgoal = sim._robot.untucked_default_joint_pos[sim._arm_joint_control_indices]
-        # qgoal = (0.12424097874999764, 1.3712678552985822, -0.3116053947850258, 2.62593026717931, 1.190838900298941, 0.2317687545849476, 1.0115493242626759, -1.2075981800730915) 
-
-        # sim.set_arm_config(qinit)
-        # sim.env.simulator.viewer.initial_pos = [-2.2, 4.8, 1.5]
-        # sim.env.simulator.viewer.initial_view_direction = [0.6, 0.6, -0.4]
-        # sim.env.simulator.viewer.reset_viewer()
-        # sim.env.simulator.sync()
-
 
         solution = run_planner(sim, 
                                qinit=qinit,
@@ -587,39 +608,32 @@ def main():
         # if GUI:
         #     visualize_sim(sim)
 
-
-        
-
         if (plan is not None) and GUI:
             command = consolidate_plan(plan)
-
-            path = plan[0].args[-1].path
-            [print(q) for q in path[-5:]]
-            print()
+            # path = plan[0].args[-1].path
             
             if USE_CONTROLLERS:
                 wait_for_user('Simulate?')
                 command.control()
             else:
                 wait_for_user('Execute?')
-                dt = 1e-3
+                dt = sim.env.simulator.render_timestep
                 if REFINE_PATH:
                     factor=10
                     command = command.refine(num_steps=factor)
                     dt /= factor
-                command.execute(time_step=dt)
+                command.execute(time_step=dt, step_sim=True)
+
             print("Config: ", sim.get_arm_config())
             wait_for_user('Show qgoal?')
             sim.set_arm_config(qgoal, freeze=True)
             print("Config: ", sim.get_arm_config())
-            sim.env.simulator.step()
-            print()
-            print(path[0])
-            print(path[-1])
+            sim.step()
             print()
             print("Press 'Ctrl+C' in terminal or 'esc' in Viewer window to exit.")
+
             while True:
-                sim.env.simulator.step()
+                sim.step()
 
     finally:
         sim.env.close()

@@ -1,9 +1,13 @@
-.idea
+iGibson/*
+examples/*
+!examples/fetch
+
+
 **/*.pyc
+.idea
 temp
 visualizations
 statistics
 gurobi.log
 .DS_Store
 .vscode
-

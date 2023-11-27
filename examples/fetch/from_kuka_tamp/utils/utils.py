@@ -55,7 +55,7 @@ def import_module(module, package=None):
     if module=='motion':
         module = 'motion.motion_planners'
     elif module=='pybullet_tools':
-        module = 'pybullet_tools'
+        module = 'pybullet_tools' # ?
 
     if ins.ismodule(package):
         if hasattr(package,module):

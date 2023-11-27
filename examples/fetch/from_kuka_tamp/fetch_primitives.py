@@ -618,6 +618,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                                 self_collisions:bool=True, 
                                 disabled_collisions:Set[Tuple[int,int]]=set(),
                                 allow_collision_links:List[int]=[],
+                                allow_gripper_collisions=False,
     ) -> Tuple[BaseRobot, int,List[int],List[int],Set[Tuple[int,int]],List[Tuple[int,int]],List[int],List[float],List[float]]:
         '''Assuming one Fetch robot so we can use MotionPlanningWrapper functionality
         '''
@@ -639,11 +640,12 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             ]
             disabled_collisions += [collision for collision in fetch_disabled_collisions if collision not in disabled_collisions]
             
-            allow_collision_links = set(allow_collision_links)
-            allow_collision_links.add(self.eef_link)
-            finger_links = set([finger.link_id for finger in robot.finger_links[robot.default_arm]])
-            allow_collision_links |= finger_links
-            allow_collision_links = list(allow_collision_links)
+            if allow_gripper_collisions:
+                allow_collision_links = set(allow_collision_links)
+                allow_collision_links.add(self.eef_link)
+                finger_links = set([finger.link_id for finger in robot.finger_links[robot.default_arm]])
+                allow_collision_links |= finger_links
+                allow_collision_links = list(allow_collision_links)
 
         
         # Pair of links within the robot that need to be checked for self-collisions
@@ -656,7 +658,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         # Joint limits
         lower_limits, upper_limits = get_custom_limits(robot_bid, joint_ids)
 
-        return robot, robot_bid, joint_ids, obstacles, disabled_collisions, self_collision_id_pairs, moving_robot_bids, lower_limits, upper_limits
+        return robot, robot_bid, joint_ids, obstacles, disabled_collisions, allow_collision_links, self_collision_id_pairs, moving_robot_bids, lower_limits, upper_limits
     
     
     
@@ -772,6 +774,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                                 self_collisions:bool=True, 
                                 disabled_collisions={},
                                 allow_collision_links=[], 
+                                allow_gripper_collisions=False,
                                 **kwargs
     ):
         '''Assuming one Fetch robot so we can use MotionPlanningWrapper functionality
@@ -782,6 +785,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             joint_ids, 
             obstacles, 
             disabled_collisions, 
+            allow_collision_links,
             self_collision_id_pairs, 
             moving_robot_bids, 
             lower_limits, 
@@ -791,6 +795,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             self_collisions=self_collisions, 
             disabled_collisions=disabled_collisions,
             allow_collision_links=allow_collision_links, 
+            allow_gripper_collisions=allow_gripper_collisions,
         )
 
         def _ensure_joint_position_vector(
@@ -960,6 +965,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         use_aabb=False, 
         cache=True, # original pybullet_tools version only
         allow_collision_links=[], # iGibson pybullet_tools version only
+        allow_gripper_collisions=False, # iGibson pybullet_tools version only
     ):
         ( 
             _,
@@ -967,6 +973,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             joint_ids, 
             obstacles, 
             disabled_collisions, 
+            allow_collision_links,
             self_collisions, 
             _, 
             _, 
@@ -975,8 +982,14 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         = self.get_robot_arm_collision_params(
             self_collisions=self_collisions, 
             disabled_collisions=disabled_collisions,
-            ignore_other_scene_obstacles=ignore_other_scene_obstacles
+            allow_collision_links=allow_collision_links, 
+            allow_gripper_collisions=allow_gripper_collisions,
         )
+        # = self.get_robot_arm_collision_params(
+        #     self_collisions=self_collisions, 
+        #     disabled_collisions=disabled_collisions,
+        #     ignore_other_scene_obstacles=ignore_other_scene_obstacles
+        # )
 
         distance_fn = pybullet_tools.utils.get_distance_fn(robot_bid, joint_ids, weights=weights)
         sample_fn = pybullet_tools.utils.get_sample_fn(robot_bid, joint_ids)

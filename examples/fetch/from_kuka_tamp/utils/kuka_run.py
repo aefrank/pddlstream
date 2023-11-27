@@ -203,12 +203,12 @@ def main():
     #     for p in plan
     # ]
 
-
     if (plan is None) or not has_gui():
         disconnect()
         return
 
     command = postprocess_plan(plan)
+    [print(c,'\t',getattr(command,c)) for c in dir(command)]
     if args.simulate:
         wait_for_user('Simulate?')
         command.control()

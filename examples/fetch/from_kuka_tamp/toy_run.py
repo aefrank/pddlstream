@@ -1,8 +1,5 @@
-
-
-
 from collections import UserDict
-from itertools import takewhile
+from itertools import product, takewhile
 from json import load
 import os
 import functools as ft
@@ -13,24 +10,20 @@ import sys
 from typing_extensions import TypeAlias
 from igibson import object_states
 from igibson.envs.igibson_env import iGibsonEnv
-from igibson.external.pybullet_tools.utils import refine_path, wait_for_user
 from igibson.robots import Fetch
-from igibson.utils.motion_planning_wrapper import MotionPlanningWrapper
 import numpy as np
 from typing import Any, Callable, List, NamedTuple, NamedTuple, NewType, NoReturn, Optional, Tuple, Iterable, Union
-from igibson.tasks.behavior_task import enable_real_time, is_mesh_on_surface, is_movable
 
 from igibson.utils.assets_utils import get_all_object_categories, get_ig_model_path, get_object_models_of_category
 from numpy import pi, random
 from transforms3d.euler import quat2euler
-from examples.fetch.from_kuka_tamp.utils.utils import PybulletToolsVersion
-from examples.pybullet.utils.pybullet_tools.utils import Attachment, trajectory_controller, wait_for_duration
+from examples.fetch.from_kuka_tamp.utils.utils import PybulletToolsVersion, import_module
 from iGibson.igibson.utils.assets_utils import get_ig_avg_category_specs
 
-from igibson.action_primitives.starter_semantic_action_primitives import URDFObject
+from igibson.action_primitives.starter_semantic_action_primitives import URDFObject, UndoableContext
 from igibson.objects.object_base import BaseObject
 
-from examples.fetch.from_kuka_tamp.fetch_primitives import BID, UID, JointPos, MyiGibsonSemanticInterface, Object, _sync_viewer_after_exec
+from examples.fetch.from_kuka_tamp.fetch_primitives import BID, UID, JointPos, KinematicConstraint, MyiGibsonSemanticInterface, Object, _sync_viewer_after_exec, iGibsonSemanticInterface
 from examples.fetch.from_kuka_tamp.utils.object_spec import Euler, Kwargs, ObjectSpec, Orientation3D, Position3D, Quaternion
 from examples.pybullet.utils.pybullet_tools.kuka_primitives import ApplyForce, Attach, BodyConf, BodyGrasp, BodyPose, BodyPath, Command
 from pddlstream.algorithms.meta import create_parser, solve
@@ -38,10 +31,54 @@ from pddlstream.language.constants import PDDLProblem
 from pddlstream.language.generator import from_fn, from_gen_fn, from_test
 from pddlstream.utils import Profiler, read
 
+from igibson.external.pybullet_tools.utils import refine_path, wait_for_user
+from examples.pybullet.utils.pybullet_tools.utils import Attachment, wait_for_duration
+
+
 ##############################################################################
 
 Pose: TypeAlias = Tuple[Position3D, Orientation3D]
 
+
+def prune_kwargs(fn):
+    fn_kwargs = [k for k,param in ins.signature(fn).parameters.items() if param.kind in [ins.Parameter.KEYWORD_ONLY, ins.Parameter.POSITIONAL_OR_KEYWORD, ins.Parameter.VAR_KEYWORD]]
+    # fn_varkwargs = [k for k,param in ins.signature(fn).parameters.items() if param.kind==ins.Parameter.VAR_KEYWORD]
+    @ft.wraps(fn)
+    def wrapper(*args, **kwargs):
+        relevant_kwargs = {k:v for k,v in kwargs.items() if k in fn_kwargs}
+        return fn(*args, **relevant_kwargs)
+    return wrapper
+
+def _convert_args_to_raw_arm_configs(*joint_pos_arg_ids, sim:Optional['ModifiedMiGSI']=None):
+    for qarg in joint_pos_arg_ids:
+        assert isinstance(qarg,(int,str)), f"Expected integer or string arguments, not {qarg} : {type(qarg)}."
+    as_arm_config = lambda sim,x: sim.as_arm_config(x)
+
+    def _decorator(
+        qspace_fn:Callable[[JointPos,Iterable[Attachment]],bool]
+    ) -> Callable[[KinematicConstraint,Iterable[Attachment]],bool]:
+        ft.wraps(qspace_fn)
+        sig = ins.signature(qspace_fn)
+        def _wrapper(*args, **kwargs) -> bool :
+            nonlocal sim
+            if sim is None:
+                sim = args[0]
+            params = sig.bind(*args, **kwargs)
+            params.apply_defaults()
+            args, kwargs = params.args, params.kwargs
+            for qarg in joint_pos_arg_ids:
+                if isinstance(qarg,int):
+                    args[qarg] = as_arm_config(sim, args[qarg])
+                else:
+                    params.arguments[qarg] = as_arm_config(sim, params.arguments[qarg])
+
+            return qspace_fn(*params.args, **params.kwargs)
+        
+        return _wrapper
+    return _decorator
+
+
+##############################################################################
 
 
 class ObjSpec(UserDict):
@@ -249,18 +286,266 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
 
     ###############################################################
 
-    def plan_arm_joint_motion(self, q1:JointPos, q2:JointPos, 
-                              obstacles:Optional[List[int]] = None, attachments:List[Attachment] = ..., 
-                              **kwargs:Kwargs):
+    def _get_robot_arm_collision_fn(self,
+                                *,
+                                obstacles=None,
+                                self_collisions=True, 
+                                disabled_collisions={},
+                                allow_collision_links=[], 
+                                allow_gripper_collisions=False,
+                                planning_utils_version=PybulletToolsVersion.PDDLSTREAM,
+                                **kwargs
+    ):
         if obstacles is None:
-            obstacles = [obj for obj in self._objects if not self.is_movable(obj)]
-        return super().plan_arm_joint_motion(
-            q1, 
-            q2, 
+            obstacles = []
+            ignore_other_scene_obstacles = False
+        else:
+            ignore_other_scene_obstacles = True
+        pybullet_tools = import_module("pybullet_tools", planning_utils_version)
+
+        ( 
+            robot,
+            robot_bid, 
+            joint_ids, 
             obstacles, 
-            attachments, 
+            disabled_collisions, 
+            allow_collision_links,
+            self_collision_id_pairs, 
+            moving_robot_bids, 
+            lower_limits, 
+            upper_limits 
+        ) \
+        = self.get_robot_arm_collision_params(
+            obstacles=obstacles,
+            ignore_other_scene_obstacles=ignore_other_scene_obstacles,
+            self_collisions=self_collisions, 
+            disabled_collisions=disabled_collisions,
+            allow_collision_links=allow_collision_links, 
+            allow_gripper_collisions=allow_gripper_collisions,
+        )
+
+    
+    def get_robot_arm_collision_params(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def _get_arm_collision_params(
+        self, 
+        obstacles=None,
+        *,
+        ignore_other_scene_obstacles=None,
+        ignore_self_collisions=False,
+        ignore_gripper_collisions=False,
+        use_aabb=False,
+        planning_utils_version=PybulletToolsVersion.PDDLSTREAM,
+        **kwargs,
+    ) -> bool:
+        
+        get_relevant_kwargs = lambda fn: {k:v for k,v in kwargs.items() if k in ins.signature(fn).parameters}
+
+        if obstacles is None and ignore_other_scene_obstacles is None: 
+            # neither specified -> default to using all obstacles in scene
+            obstacles = []
+            ignore_other_scene_obstacles = False
+        elif ignore_other_scene_obstacles is None: 
+            # obstacles specified, ignore_other_scene_obstacles is not; assume we ignore unspecified obstacles
+            ignore_other_scene_obstacles = True
+        elif obstacles is None: 
+            # ignore_other_scene_obstacles specified, obstacles not; obstacles is empty list
+            obstacles = []
+
+        relevant_kwargs = get_relevant_kwargs(super().get_robot_arm_collision_params)
+        ( 
+            robot,
+            robot_id, 
+            joint_ids, 
+            obstacles, 
+            _, 
+            _,
+            self_collision_id_pairs, 
+            moving_robot_bids, 
+            lower_limits, 
+            upper_limits 
+        ) \
+        = super().get_robot_arm_collision_params(
+            obstacles=obstacles,
+            ignore_other_scene_obstacles=ignore_other_scene_obstacles,
+            self_collisions=not ignore_self_collisions, 
+            allow_gripper_collisions=ignore_gripper_collisions,
+            **relevant_kwargs
+        )
+        
+        config_type_guard = _convert_args_to_raw_arm_configs
+        config_setter = ft.partial(self.set_arm_config, _sync_viewer=False)
+        pbtools_utils = import_module("pybullet_tools.utils", planning_utils_version)
+
+        relevant_kwargs = get_relevant_kwargs(pbtools_utils.all_between)
+        violates_limits = lambda q: pbtools_utils.all_between(lower_limits, q, upper_limits, **relevant_kwargs)
+
+        if use_aabb:
+            # aabb functionality only in pddlstream pybullet_tools version
+            aabb = pbtools_utils if planning_utils_version is PybulletToolsVersion.PDDLSTREAM else import_module("pybullet_tools.utils", PybulletToolsVersion.PDDLSTREAM)
+            get_moving_aabb = lambda bid: aabb.cached_fn(aabb.get_buffered_aabb, cache=True, max_distance=aabb.MAX_DISTANCE/2., **kwargs)(bid)
+            pairwise_link_collision = lambda l1, l2: \
+                aabb.aabb_overlap(get_moving_aabb(robot_id), get_moving_aabb(robot_id)) \
+                and pbtools_utils.pairwise_link_collision(robot_id, l1, robot_id, l2, **get_relevant_kwargs(pbtools_utils.pairwise_link_collision)) 
+            pairwise_collision = lambda b1, b2: \
+                aabb.aabb_overlap(get_moving_aabb(b1), get_moving_aabb(b2)) \
+                and pbtools_utils.pairwise_collision(b1, b2, **get_relevant_kwargs(pbtools_utils.pairwise_collision))
+        else:
+            pairwise_link_collision = lambda l1,l2: \
+                pbtools_utils.pairwise_link_collision(robot_id, l1, robot_id, l2, **get_relevant_kwargs(pbtools_utils.pairwise_link_collision)) 
+            pairwise_collision = lambda b1, b2: \
+                pbtools_utils.pairwise_collision(b1, b2, **get_relevant_kwargs(pbtools_utils.pairwise_collision))
+
+        return robot, joint_ids, obstacles, self_collision_id_pairs, moving_robot_bids, config_type_guard, config_setter, violates_limits, pairwise_link_collision, pairwise_collision
+
+        
+
+    def _get_arm_collision_fn(
+        self, 
+        obstacles=None,
+        *,
+        ignore_other_scene_obstacles=None,
+        ignore_self_collisions=False,
+        ignore_gripper_collisions=False,
+        attachments=[],
+        use_aabb=False,
+        planning_utils_version=PybulletToolsVersion.PDDLSTREAM,
+        **kwargs,
+        ) -> bool:
+        
+        ( 
+            robot, joint_ids, 
+            obstacles, self_collision_id_pairs, moving_robot_bids, 
+            config_type_guard, config_setter, 
+            violates_limits, pairwise_link_collision, pairwise_collision
+        ) \
+        = self._get_arm_collision_params(
+            obstacles=obstacles,
+            ignore_other_scene_obstacles=ignore_other_scene_obstacles,
+            ignore_self_collisions=ignore_self_collisions,
+            ignore_gripper_collisions=ignore_gripper_collisions,
+            use_aabb=use_aabb,
+            planning_utils_version=planning_utils_version,
             **kwargs
         )
+        ATTACHMENTS_DEFAULT = attachments
+
+        @config_type_guard('q', sim=self)
+        def arm_collision_fn(q:JointPos, attachments:Iterable[Attachment]=ATTACHMENTS_DEFAULT, *, verbose=False):
+            assert len(joint_ids) == len(q)
+            with UndoableContext(robot):
+                if violates_limits(q):
+                    return True
+                config_setter(q)
+                for attachment in attachments:
+                    attachment.assign()
+                
+                # Check for self collisions
+                for link1, link2 in iter(self_collision_id_pairs):
+                    if pairwise_link_collision(link1, link2):
+                        return True
+                # Include attachments as "moving bodies" to be tested for collisions
+                attached_bodies = [attachment.child for attachment in attachments]
+                moving_body_ids = moving_robot_bids + attached_bodies
+
+                # Check for collisions of the moving bodies and the obstacles
+                for moving, obs in product(moving_body_ids, obstacles):
+                    if pairwise_collision(moving, obs):
+                        return True
+                
+                # No collisions detected
+                return False
+            
+        return arm_collision_fn
+
+
+    def _get_arm_joint_motion_helper_fns(self, 
+        obstacles=None,
+        *,
+        ignore_self_collisions=False,
+        ignore_other_scene_obstacles=False,
+        ignore_gripper_collisions=False,
+        attachments=[],
+        use_aabb=False, 
+        planning_utils_version=PybulletToolsVersion.PDDLSTREAM,
+        **kwargs
+    ):
+        robot_id = self.robot_bid
+        joint_ids = self._arm_joint_ids
+        pbtools_utils = import_module("pybullet_tools.utils", planning_utils_version)
+
+        get_relevant_kwargs = lambda fn: {k:v for k,v in kwargs.items() if k in ins.signature(fn).parameters}
+        check_initial_end = ft.partial(pbtools_utils.check_initial_end, **get_relevant_kwargs(pbtools_utils.check_initial_end))
+        distance_fn = pbtools_utils.get_distance_fn(robot_id, joint_ids, **get_relevant_kwargs(pbtools_utils.get_distance_fn))
+        sample_fn = pbtools_utils.get_sample_fn(robot_id, joint_ids, **get_relevant_kwargs(pbtools_utils.get_sample_fn))
+        extend_fn = pbtools_utils.get_extend_fn(robot_id, joint_ids, **get_relevant_kwargs(pbtools_utils.get_extend_fn))
+
+        collision_fn = self._get_arm_collision_fn(
+            obstacles=obstacles,
+            ignore_other_scene_obstacles=ignore_other_scene_obstacles,
+            ignore_self_collisions=ignore_self_collisions,
+            ignore_gripper_collisions=ignore_gripper_collisions,
+            attachments=attachments,
+            use_aabb=use_aabb,
+            planning_utils_version=planning_utils_version,
+            **kwargs,
+        )
+
+        return check_initial_end, distance_fn, sample_fn, extend_fn, collision_fn
+   
+    @_convert_args_to_raw_arm_configs('q1','q2')
+    def plan_arm_joint_motion(self, 
+        q1:JointPos, 
+        q2:JointPos, 
+        obstacles:Optional[List[BID]]=None,
+        algorithm:str='birrt',
+        *,
+        ignore_other_scene_obstacles=None,
+        ignore_self_collisions=False,
+        ignore_gripper_collisions=False,
+        attachments:List[Attachment]=[],
+        planning_utils_version:PybulletToolsVersion=PybulletToolsVersion.PDDLSTREAM, 
+        use_aabb:bool=False, 
+        **kwargs
+    ):
+        # if isinstance(q1,BodyConf): q1 = q1.configuration
+        # if isinstance(q2,BodyConf): q2 = q2.configuration
+
+        assert len(self._arm_joint_ids) == len(q1) and len(self._arm_joint_ids) == len(q2)
+
+        # if obstacles is None:
+        #     # obstacles = [obj for obj in self._objects if not self.is_movable(obj)]
+        #     obstacles = [obj for obj in self.env.scene.get_objects() if not self.is_movable(obj)]
+
+        check_initial_end, distance_fn, sample_fn, extend_fn, collision_fn = self._get_arm_joint_motion_helper_fns( 
+            obstacles=obstacles,
+            attachments=attachments,
+            ignore_other_scene_obstacles=ignore_other_scene_obstacles,
+            ignore_self_collisions=ignore_self_collisions,
+            ignore_gripper_collisions=ignore_gripper_collisions,
+            planning_utils_version=planning_utils_version,
+            use_aabb=use_aabb,
+            **kwargs
+        )
+        with UndoableContext(self._robot):
+            if not check_initial_end(q1, q2, collision_fn):
+                return None
+            
+            mp_algo_fn = self._get_motion_planning_algorithm(algorithm)
+            if algorithm == 'direct':
+                return mp_algo_fn(q1, q2, extend_fn, collision_fn)
+            elif algorithm == 'birrt':
+                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, **kwargs)
+            elif algorithm == 'rrt_star':
+                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, max_iterations=5000, **kwargs)
+            elif algorithm == 'rrt':
+                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, iterations=500, **kwargs)
+            elif algorithm == 'lazy_prm':
+                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, [500, 2000, 5000], **kwargs)
+            else:
+                return None
+
 
     def get_grasp_gen(self):
         grasps = super().get_grasp_gen()
@@ -278,10 +563,13 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
             try:
                 out = calculate_grasp_command(target, grasp)
                 if out is not None:
-                    conf = BodyConf(body=self.robot_bid, joints=self._arm_joint_ids, configuration=out[0])
-                    command = ArmCommand(body_paths=[ 
-                            ArmPath(self, path.path, path.attachments) if isinstance(path,BodyPath) else
-                            path for path in out[1].body_paths
+                    q, cmd = out
+                    conf = BodyConf(body=self.robot_bid, joints=self._arm_joint_ids, configuration=q)
+                    command = ArmCommand(
+                        body_paths=[
+                            ArmPath(self, path.path, path.attachments) 
+                            if isinstance(path,BodyPath) 
+                            else path for path in cmd.body_paths
                     ])
                     out = (conf, command)
                 return out
@@ -293,6 +581,9 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
         pose = super().arm_fk(q)
         return (BodyPose(self.robot_bid, pose),)
 
+
+
+        
 
 
 class ArmConf(BodyConf):
@@ -556,35 +847,26 @@ def visualize_sim(sim:ModifiedMiGSI):
 def get_objects():
     counter = ObjSpec("counter", "countertop", model='counter_0',
                       position=(-2.35,  4.95,  0.35),
-                    #   position=(-2.36734748,  5.5552516 ,  0.45443946),
                       orientation=(0,0,pi/2),
-                    #   orientation=(-0.        , -0.        ,  0.70853085,  0.70567984), 
                       fixed_base=True,
-                    #   scale=np.array((0.5, 0.5, 0.7)),
-                    #   scale=np.array((0.44914447, 0.52874679, 0.63933571)),
-                    #   bounding_box=(0.496562, 0.614757, 0.891),
                       bounding_box=(1.0, 0.5, 0.75),
                       )
     sink   = ObjSpec("sink",  "sink", model='kitchen_sink',    
                      position=(-2.35,  5.8,  0.3),
                      orientation=(0,0,pi/2),
                      fixed_base=True,
-                    #  scale=np.array([0.97625266, 0.70599113, 0.78163018]),
                      bounding_box=(0.75,  0.5,  0.75),
-                    #  bounding_box=(0.88,  0.62,  1.089),
                      )
     stove  = ObjSpec("stove",  "stove", model='101924',
                      position=(-0.225  , 5.75,  0.6), 
-                    #  position=(-0.221481  ,  5.92155266,  0.52469647), 
                      orientation=(0,0,-pi/2),
                      fixed_base=True,
-                    #  scale=np.array((0.68030202, 0.93826808, 0.78960697)), 
                      bounding_box=(1.0,  0.75,  1.25),
                     )
     celery = ObjSpec("celery", "celery", model='celery_000', 
                      position=(-2.3,  5.1,  1.0), place_on='counter', fixed_base=False, scale=0.15)
     radish = ObjSpec("radish", "radish", model='45_0', 
-                     position=(-2.15,  5.3,  1.0), place_on='counter', fixed_base=False, scale=1.25)
+                     position=(-2.15,  5.3,  1.0), place_on='counter', fixed_base=False, scale=1)
     
     return sink, stove, counter, celery, radish
 
@@ -634,7 +916,7 @@ def decide_gui(*, force:bool=None):
     parser.add_argument('-g','--gui', action='store_true', help='Render and visualize the system')
     args = parser.parse_args()
 
-    gui = args.gui if (gui_env_var:=os.getenv("GUI")) is None else gui_env_var
+    gui = args.gui if args.gui else bool(os.getenv("GUI"))
     if gui:
         print("Visualization on.")
     
@@ -668,58 +950,42 @@ def main():
                                print_results=False
                             )
         plan = solution.plan
-        print(plan, '\n')
+        
 
         # if GUI:
         #     visualize_sim(sim)
 
-        if (plan is not None) and GUI:
-            command = consolidate_plan(plan)
-            # path = plan[0].args[-1].path
-            
-            if USE_CONTROLLERS:
-                wait_for_user('Simulate?')
-                command.control()
-            else:
-                wait_for_user('Execute?')
-                dt = sim.env.simulator.render_timestep
-                if REFINE_PATH:
-                    factor=10
-                    dt /= factor
-
-                # for action in plan:
-                #     name, *args = action
-                #     if  name == 'pick':
-                #         obj, grasp, approach_pose, action_path = args
-                        
-                        
-                        
-                #     elif name == 'place':
-                #         paths += args[-1].reverse().body_paths
-                #     elif name in ['move', 'move_free', 'move_holding', 'pick']:
-                #         path = args[-1]
-                #         if isinstance(path, Command):
-                #             paths += path.body_paths
-                #         elif isinstance(path, ArmPath):
-                #             paths += [path]
-                #         else:
-                #             raise NotImplementedError(f"no handling implemented for action ({name} {args}) with args[-1] of type {type(args[-1])}")
-                #     if name == 'move':
-
+        if plan is None:
+            print("\nNo solution found. Exiting...")
+        else:
+            print("\n#####################################################\nSolution:")
+            print(plan, "\n")
+            if GUI:
+                command = consolidate_plan(plan)
+                # path = plan[0].args[-1].path
+                
+                if USE_CONTROLLERS:
+                    wait_for_user('Simulate?')
+                    command.control()
+                else:
+                    wait_for_user('Execute?')
+                    dt = sim.env.simulator.render_timestep
                     if REFINE_PATH:
-                        command = command.refine(num_steps=factor)
-                command.execute(time_step=dt, step_sim=True)
+                        refinement_factor = 10
+                        dt /= refinement_factor
+                        command = command.refine(num_steps=refinement_factor)
+                    command.execute(time_step=dt, step_sim=True)
 
-            print("Config: ", sim.get_arm_config())
-            wait_for_user('Show qgoal?')
-            sim.set_arm_config(qgoal, freeze=True)
-            print("Config: ", sim.get_arm_config())
-            sim.step()
-            print()
-            print("Press 'Ctrl+C' in terminal or 'esc' in Viewer window to exit.")
-
-            while True:
+                print("Config: ", sim.get_arm_config())
+                wait_for_user('Show qgoal?')
+                sim.set_arm_config(qgoal, freeze=True)
+                print("Config: ", sim.get_arm_config())
                 sim.step()
+                print()
+                print("Press 'Ctrl+C' in terminal or 'esc' in Viewer window to exit.")
+
+                while True:
+                    sim.step()
 
     finally:
         sim.env.close()

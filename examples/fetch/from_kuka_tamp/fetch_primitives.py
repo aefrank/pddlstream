@@ -214,16 +214,16 @@ class iGibsonSemanticInterface:
 ################################################################################################
 ################################################################################################
 
-def _sync_viewer_after_exec(mthd):
-        @ft.wraps(mthd)
-        def wrapper(_iface:iGibsonSemanticInterface, *args:tuple, _sync_viewer:bool=True, **kwargs:Kwargs):
-            if _sync_viewer: 
-                if _iface.has_gui:
-                    returnval = mthd(_iface, *args, **kwargs)
-                    _iface.env.simulator.sync()
-                    return returnval
-            return mthd(_iface, *args, **kwargs)
-        return wrapper
+# def _sync_viewer_after_exec(mthd):
+#         @ft.wraps(mthd)
+#         def wrapper(_iface:iGibsonSemanticInterface, *args:tuple, _sync_viewer:bool=True, **kwargs:Kwargs):
+#             if _sync_viewer: 
+#                 if _iface.has_gui:
+#                     returnval = mthd(_iface, *args, **kwargs)
+#                     _iface.env.simulator.sync()
+#                     return returnval
+#             return mthd(_iface, *args, **kwargs)
+#         return wrapper
 
 
 class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
@@ -262,15 +262,15 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     def _arm_joint_control_indices(self) -> List[int]:
         return [*self._robot.trunk_control_idx, *self._robot.arm_control_idx[self._robot.default_arm]]
     
-    @_sync_viewer_after_exec
+    # @_sync_viewer_after_exec
     def set_position(self, body:UID, position:Position) -> None:
         return super().set_position(body, position)
 
-    @_sync_viewer_after_exec
+    # @_sync_viewer_after_exec
     def set_orientation(self, body:UID, orientation:Orientation, *, force_quaternion=True) -> None:
         return super().set_orientation(body, orientation, force_quaternion=force_quaternion)
 
-    @_sync_viewer_after_exec
+    # @_sync_viewer_after_exec
     def set_position_orientation(self, body:UID, 
                                  position:Position, 
                                  orientation:Orientation, 
@@ -279,16 +279,16 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         return super().set_position_orientation(body=body, position=position, orientation=orientation, force_quaternion=force_quaternion)
 
 
-    @_sync_viewer_after_exec
+    # @_sync_viewer_after_exec
     def set_joint_positions(self, body:UID, joints:Iterable[int], values:JointPos):
         return super().set_joint_positions(body, joints, values)
 
 
     ################################### Initialize Environment #####################################
     # TODO: generalize
-    def __init__(self, config_file:str, objects:Collection[ObjectSpec]=[], *, headless:bool=True, verbose=True):
+    def __init__(self, config_file:str, objects:Collection[ObjectSpec]=[], *, headless:bool=True, tensor:bool=False, verbose=True):
         self.has_gui = not headless
-        self._init_igibson(config=config_file, headless=headless)
+        self._init_igibson(config=config_file, headless=headless, tensor=tensor)
         self.load_objects(objects, verbose=verbose)
         self._init_object_state(objects,verbose=verbose)
         self._init_robot_state()
@@ -296,7 +296,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         if self.has_gui:
             self._viewer_setup()
 
-    def _init_igibson(self, config:Union[str,dict]={}, headless:bool=True, **config_options:Kwargs) -> Tuple[iGibsonEnv, MotionPlanningWrapper]:
+    def _init_igibson(self, config:Union[str,dict]={}, headless:bool=True, tensor:bool=False, **config_options:Kwargs) -> Tuple[iGibsonEnv, MotionPlanningWrapper]:
         # Load simulation config
         if isinstance(config,str): 
             config = self._load_config(config_file=config, **config_options)
@@ -304,11 +304,18 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         if not config['robot']['name'] == 'Fetch':
             raise NotImplementedError(f"{self.__class__.__name__} is only currently implemented for a single Fetch robot.")
         # Initialize iGibson simulation environment
+        MODE = {
+            (True,  True)  : "headless_tensor",
+            (True,  False) : "headless",
+            (False, True)  : "gui_tensor",
+            (False, False) : "gui_interactive",
+        }
         env = iGibsonEnv(
             config_file=config,
-            mode="gui_interactive" if not headless else "headless",
-            action_timestep=1.0 / 120.0,
-            physics_timestep=1.0 / 120.0,
+            mode=MODE[(headless,tensor)]
+            # mode="gui_interactive" if not headless else "headless",
+            # action_timestep=1.0 / 120.0,
+            # physics_timestep=1.0 / 120.0,
         ) 
         self._env = env
         # Setup motion planning wrapper
@@ -395,17 +402,17 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             robot.tuck() if tuck else robot.untuck()
             robot.keep_still()
     
-    @_sync_viewer_after_exec
+    # @_sync_viewer_after_exec
     def _viewer_setup(self, position:Position=[-0.8, 0.7, 1.7], orientation:Euler=[0.1, -0.9, -0.5], *, keep_viewer_on_top=True) -> None:
         # Set viewer camera 
         self.env.simulator.viewer.initial_pos = position
         self.env.simulator.viewer.initial_view_direction = orientation
         self.env.simulator.viewer.reset_viewer()
 
-        # This doesn't seem to be working
-        if keep_viewer_on_top:
-            cv2.setWindowProperty("RobotView", cv2.WND_PROP_TOPMOST, 1)
-            cv2.setWindowProperty("Viewer", cv2.WND_PROP_TOPMOST, 1)
+        # # This doesn't seem to be working
+        # if keep_viewer_on_top:
+        #     cv2.setWindowProperty("RobotView", cv2.WND_PROP_TOPMOST, 1)
+        #     cv2.setWindowProperty("Viewer", cv2.WND_PROP_TOPMOST, 1)
     
     
     ################################################################################
@@ -428,7 +435,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         assert state in self._states, f"state '{state}' not registered in '_states' field of MyiGibsonSemanticInterface object."
         return MyiGibsonSemanticInterface._state_access_map[state][0](self,body)
     
-    @_sync_viewer_after_exec
+    # @_sync_viewer_after_exec
     def set_state(self, body:UID, state:str, value:Any) -> None:
         assert state in self._states, f"state '{state}' not registered in '_states' field of MyiGibsonSemanticInterface object."
         MyiGibsonSemanticInterface._state_access_map[state][1](self, body, value)
@@ -444,7 +451,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             else:
                 raise e
     
-    @_sync_viewer_after_exec
+    # @_sync_viewer_after_exec
     def set_pose(self, 
                  body:UID, 
                  pose:Optional[Pose]=None, 
@@ -473,7 +480,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
     def get_arm_config(self) -> JointPos:
         return self.get_joint_positions(self.robot_bid, self._arm_joint_ids)
     
-    @_sync_viewer_after_exec
+    # @_sync_viewer_after_exec
     def set_arm_config(self, q:JointPos, attachments:List[Attachment]=[], freeze=False) -> None:
         if isinstance(q,BodyConf): q = q.configuration
         self.set_joint_positions(self.robot_bid, self._arm_joint_ids, q)
@@ -671,7 +678,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             #   worldLinkFramePosition: Position3D, worldLinkFrameOrientation: Quaternion
             # In addition, if pybullet.getLinkState is called with computeLinkVelocity=1, there will be two additional return values:
             #   worldLinkLinearVelocity:Tuple[float,float,float], worldLinkAngularVelocity:Tuple[float,float,float]
-            self.set_arm_config(q, _sync_viewer=False)
+            self.set_arm_config(q) #, _sync_viewer=False)
             pos, orn, _, _, _, _ = pb.getLinkState(self.robot_bid, self.eef_link, computeForwardKinematics=True, physicsClientId=get_client())
             return (pos, orn)
 
@@ -778,6 +785,8 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                                 **kwargs
     ):
         '''Assuming one Fetch robot so we can use MotionPlanningWrapper functionality
+
+        Mimics iGibson pybullet_tools.utils.get_collision_fn
         '''
         ( 
             robot,
@@ -814,14 +823,28 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             with UndoableContext(robot):
                 if not all_between(lower_limits, q, upper_limits):
                     return True
-                self.set_arm_config(q, _sync_viewer=False)
+                self.set_arm_config(q) #, _sync_viewer=False)
                 for attachment in attachments:
                     attachment.assign()
+                ################################################################################
+                # get_moving_aabb = cached_fn(get_buffered_aabb, cache=True, max_distance=max_distance/2., **kwargs) # pddlstream pybullet_tools.utils.get_collision_fn
+                ################################################################################
+                
 
                 # Check for self collisions
                 for link1, link2 in iter(self_collision_id_pairs):
                     if pairwise_link_collision(robot_bid, link1, robot_bid, link2):
                         return True
+                    ################################################################################
+                    ##### pddlstream pybullet_tools.utils.get_collision_fn:
+                    # # Self-collisions should not have the max_distance parameter
+                    # # TODO: self-collisions between body and attached_bodies (except for the link adjacent to the robot)
+                    # if (not use_aabb or aabb_overlap(get_moving_aabb(body), get_moving_aabb(body))) and \
+                    #         pairwise_link_collision(body, link1, body, link2): #, **kwargs):
+                    #     #print(get_body_name(body), get_link_name(body, link1), get_link_name(body, link2))
+                    #     if verbose: print(body, link1, body, link2)
+                    #     return True
+                    ################################################################################
                 
                 # Include attachments as "moving bodies" to be tested for collisions
                 attached_bodies = [attachment.child for attachment in attachments]
@@ -829,6 +852,11 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
                 # Check for collisions of the moving bodies and the obstacles
                 for moving, obs in product(moving_body_ids, obstacles):
+                    ################################################################################
+                    ##### pddlstream pybullet_tools.utils.get_collision_fn:
+                    # if (not use_aabb or aabb_overlap(get_moving_aabb(body1), get_obstacle_aabb(body2))) \
+                    # and pairwise_collision(body1, body2, **kwargs):
+                    ################################################################################
                     if pairwise_collision(moving, obs, **kwargs):
                         return True
                 
@@ -1119,7 +1147,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
                 
                 # Find a collision-free path from approach to grasp config
                 for _ in range(num_attempts):
-                    self.set_arm_config(approach_config, _sync_viewer=False)
+                    self.set_arm_config(approach_config) # , _sync_viewer=False)
                     path = self._motion_planner.plan_arm_motion(arm_joint_positions=grasp_config)
                     if path is not None:
                         # Starting at approach config, move to grasp config, perform grasp, and return to approach config
@@ -1176,7 +1204,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
         def qfree_traj(q1:JointPos, q2:JointPos, atpose_fluents:List[Tuple]=[]) -> Optional[Command]:
             with UndoableContext(robot):
                 # q1.assign()
-                self.set_arm_config(q1, _sync_viewer=False)
+                self.set_arm_config(q1) #, _sync_viewer=False)
                 # Temporarily use only specified obstacles for motion planner
                 original_mp_obstacles = self._motion_planner.mp_obstacles
                 self._motion_planner.mp_obstacles = set(self.get_collidable_body_ids()) | self.assign_poses(atpose_fluents)
@@ -1250,7 +1278,7 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
             if (b1 == b2): 
                 return False
             with UndoableContext(self._robot):
-                self.set_pose(b2, p2, _sync_viewer=False)
+                self.set_pose(b2, p2) #, _sync_viewer=False)
                 for obj_pose in interpolate_poses(g1.grasp_pose, g1.approach_pose):
                     collision_free = self.is_collision_free(b1,obj_pose,b2,p2)
                     if not collision_free:

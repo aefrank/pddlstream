@@ -181,6 +181,10 @@ def main():
         print(solution)
         # print_solution(solution)
         # plan, cost, evaluations = solution
+
+        while True:
+            sim.env.simulator.step()
+
     finally:
         sim.close()
 

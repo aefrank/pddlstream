@@ -46,6 +46,7 @@ robot:
       use_delta_commands: false
       
 hide_robot: false
+optimized_renderer: true
 
 # task
 # task: room_rearrangement

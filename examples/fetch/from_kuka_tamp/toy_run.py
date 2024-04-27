@@ -1,17 +1,6 @@
-import timeit
-
-
-
-
-
-
 import sys, os
 import subprocess
 from argparse import ArgumentError, ArgumentParser, Namespace
-
-
-
-
 from collections import UserDict
 from itertools import product, takewhile
 from json import load
@@ -24,6 +13,7 @@ from typing_extensions import TypeAlias
 from igibson import object_states
 from igibson.envs.igibson_env import iGibsonEnv
 from igibson.robots import Fetch
+from igibson.utils.grasp_planning_utils import get_hand_rotation_from_axes
 import numpy as np
 from typing import Any, Callable, List, NamedTuple, NamedTuple, NewType, NoReturn, Optional, Tuple, Iterable, Union
 
@@ -42,7 +32,7 @@ from examples.fetch.from_kuka_tamp.utils.object_spec import Euler, Kwargs, Objec
 from examples.pybullet.utils.pybullet_tools.kuka_primitives import ApplyForce, Attach, BodyConf, BodyGrasp, BodyPose, BodyPath, Command
 from pddlstream.algorithms.meta import create_parser, solve
 from pddlstream.language.constants import PDDLProblem
-from pddlstream.language.generator import from_fn, from_gen_fn, from_test
+from pddlstream.language.generator import from_fn, from_gen_fn, from_list_fn, from_test
 from pddlstream.utils import Profiler, read
 
 from igibson.external.pybullet_tools.utils import refine_path, wait_for_user
@@ -214,6 +204,7 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
             # for _ in range( int( 1 / self.env.action_timestep )):
             #     self.step()
             self.run_physics(3, sync_at_end=self.has_gui)
+            self.step()
             print("done.")
 
         
@@ -553,15 +544,14 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
         verbose=False,
         **kwargs
     ):
-        # if isinstance(q1,BodyConf): q1 = q1.configuration
-        # if isinstance(q2,BodyConf): q2 = q2.configuration
+        if verbose: print(f"\n\nMOTION PLANNING:\n")
 
         assert len(self._arm_joint_ids) == len(q1) and len(self._arm_joint_ids) == len(q2)
 
         if obstacles is None:
             obstacles = [self.get_bid(obj) for obj in self._objects if not self.is_movable(obj)]
-            print(obstacles)
             # obstacles = [obj for obj in self.env.scene.get_objects() if not self.is_movable(obj)]
+        if verbose: print(f"MP Obstacles: {[self.get_name(obj) for obj in obstacles]}")
 
         distance_fn, sample_fn, extend_fn, collision_fn = self._get_arm_joint_motion_helper_fns( 
             obstacles=obstacles,
@@ -575,28 +565,32 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
             **kwargs
         )
         with UndoableContext(self._robot):
-            collision = collision_fn(q1, return_collision_pair=True)
-            if collision is not False:
+            if (collision := collision_fn(q1, return_collision_pair=True)) is not False:
                 if verbose: print(f"Initial configuration in collision:\nCollision Links: {collision}\nConfig q1={q1}")
-                return None
-            collision = collision_fn(q2, return_collision_pair=True)
-            if collision is not False:
+                plan = None
+            elif (collision := collision_fn(q2, return_collision_pair=True)) is not False:
                 if verbose: print(f"End configuration in collision:\nCollision Links: {collision}\nConfig q2={q2}")
-                return None
-            
-            mp_algo_fn = self._get_motion_planning_algorithm(algorithm)
-            if algorithm == 'direct':
-                return mp_algo_fn(q1, q2, extend_fn, collision_fn)
-            elif algorithm == 'birrt':
-                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, **kwargs)
-            elif algorithm == 'rrt_star':
-                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, max_iterations=5000, **kwargs)
-            elif algorithm == 'rrt':
-                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, iterations=500, **kwargs)
-            elif algorithm == 'lazy_prm':
-                return mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, [500, 2000, 5000], **kwargs)
+                plan = None
             else:
-                return None
+                if verbose: print(f"Beginning motion planning with algorithm {algorithm}...")
+                mp_algo_fn = self._get_motion_planning_algorithm(algorithm)
+                if algorithm == 'direct':
+                    plan = mp_algo_fn(q1, q2, extend_fn, collision_fn)
+                elif algorithm == 'birrt':
+                    plan = mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, **kwargs)
+                elif algorithm == 'rrt_star':
+                    plan = mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, max_iterations=5000, **kwargs)
+                elif algorithm == 'rrt':
+                    plan = mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, iterations=500, **kwargs)
+                elif algorithm == 'lazy_prm':
+                    plan = mp_algo_fn(q1, q2, distance_fn, sample_fn, extend_fn, collision_fn, [500, 2000, 5000], **kwargs)
+                else:
+                    plan = None
+            
+            if verbose: print(f"\nMotion planning complete. Plan: {plan}\n\n")
+
+            return plan
+
 
 
     def get_grasp_gen(self):
@@ -624,6 +618,8 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
                             else path for path in cmd.body_paths
                     ])
                     out = (conf, command)
+                else:
+                    out = ()
                 return out
             except (TypeError, AssertionError):
                 return None
@@ -631,7 +627,12 @@ class ModifiedMiGSI(MyiGibsonSemanticInterface):
     
     def arm_fk(self, q):
         pose = super().arm_fk(q)
-        return (BodyPose(self.robot_bid, pose),)
+        return (BodyPose(self.robot_bid, pose),) if pose is not None else None
+    
+    def arm_ik(self, *args, **kwargs):
+        q = super().arm_ik(*args, **kwargs)
+        return (ArmConf(self, q),) if q is not None else None
+
 
 
 
@@ -642,6 +643,16 @@ class ArmConf(BodyConf):
     def __init__(self, sim:ModifiedMiGSI, configuration:JointPos):
         super().__init__(body=sim.robot_bid, joints=sim._arm_joint_ids, configuration=configuration)
         self.sim = sim
+
+# class ArmConf(BodyConf):
+#     def __init__(self, sim:ModifiedMiGSI, q:JointPos):
+#         if isinstance(q, BodyConf):
+#             assert q.body == sim.robot_bid and q.joints == sim._arm_joint_ids
+#             q = q.configuration
+#         super().__init__(sim.robot_bid, q, sim._arm_joint_ids)
+#         self.sim = sim
+#     def eef_pose(self):
+#         return self.sim.arm_fk(self.configuration)
 
 
 class ArmCommand(Command):
@@ -657,6 +668,8 @@ class ArmCommand(Command):
             else:
                 for q in body_path.iterator(step_sim=step_sim):
                     pass# wait_for_duration(time_step)
+
+
 
 class ArmPath(BodyPath):
     def __init__(self, sim:ModifiedMiGSI, path:Iterable[JointPos], attachments:List[Attachment]=[]):
@@ -712,7 +725,8 @@ def init_sim(objects, headless=True, **kwargs) -> ModifiedMiGSI:
     config_path = os.path.join(dir_path,config)
 
     robot_pose=((-1.2,5.4,0),(0,0,pi)) 
-    viewer_pose=((-1.8,0.8,1.8),(0.1,0.8,-0.6))
+    # viewer_pose=((-1.8,0.8,1.8),(0.1,0.8,-0.6))
+    viewer_pose=((-2.0,4.5,1.8),(0.1,0.6,-0.8))
     # viewer_pose=((-0.6,3.9,1.8),(-0.4,0.9,-0.3))
 
     KWARGS = {
@@ -737,36 +751,57 @@ def init_sim(objects, headless=True, **kwargs) -> ModifiedMiGSI:
 ##############################################################################
 
 
-def motion_plan(sim:ModifiedMiGSI, q1, q2, o=None, g=None, as_tuple=False, **kwargs):
-    if isinstance(q1,BodyConf): q1 = q1.configuration
-    if isinstance(q2,BodyConf): q2 = q2.configuration
+
+
+
+
+def motion_plan(sim:ModifiedMiGSI, q1, q2, o=None, g=None, as_tuple=True, **kwargs):
+    # if isinstance(q1,BodyConf): q1 = q1.configuration
+    # if isinstance(q2,BodyConf): q2 = q2.configuration
     if o is not None:
         assert g is not None and g.body==sim.get_name(o)
         attachments = [g.attachment()]
     else:
         attachments=[]
-    path = ArmPath(sim, sim.plan_arm_joint_motion(q1, q2, attachments=attachments, **kwargs), attachments)
-    return path if not as_tuple else (path,)
+    path = sim.plan_arm_joint_motion(q1, q2, attachments=attachments, **kwargs)
+    if path is None:
+        return None
+    path = ArmPath(sim, path, attachments)
+    return (path,) if as_tuple else path
 
-def plan_grasp_and_carry(sim:ModifiedMiGSI, q1, q2, obj, g, as_tuple=False):
-    if isinstance(q1,BodyConf): q1 = q1.configuration
-    if isinstance(q2,BodyConf): q2 = q2.configuration
+def plan_grasp_and_carry(sim:ModifiedMiGSI, q1, q2, obj, g, as_tuple=True, **kwargs):
+    # if isinstance(q1,BodyConf): q1 = q1.configuration
+    # if isinstance(q2,BodyConf): q2 = q2.configuration
     # grasp = next(sim.get_grasp_gen()(obj))[0]
     attachments = [g.attachment()]
-    path = ArmPath(sim, sim.plan_arm_joint_motion(q1,q2,attachments=attachments), attachments)
-    return path if not as_tuple else (path,)
+    path = sim.plan_arm_joint_motion(q1, q2, attachments=attachments, **kwargs)
+    if path is None:
+        return None
+    path = ArmPath(sim, path, attachments)    
+    return (path,) if as_tuple else path
 
 
+def print_fluent(sim:ModifiedMiGSI, fluent:tuple, dec:int=3, return_only=False):
+    assert isinstance(fluent, tuple)
+    formatted_fluent = tuple(
+        (sim.get_name(arg) if isinstance(arg,int) else 
+        tuple(np.round(arg.configuration,dec)) if isinstance(arg,BodyConf) else 
+        (sim.get_name(arg.body), *(tuple(np.round(p,dec)) for p in arg.pose)) if isinstance(arg, BodyPose) else 
+        arg) for arg in fluent
+    )
+    if not return_only:
+        print(formatted_fluent)
+    return formatted_fluent
 
 def get_pddlproblem(sim:ModifiedMiGSI, q_init:Optional[Union[float,BodyConf]], q_goal:Union[float,BodyConf], verbose=True):
     if q_init is None:                     
-        q_init = BodyConf(sim.robot_bid, sim.get_arm_config())
+        q_init = ArmConf(sim, sim.get_arm_config())
     else:
         sim.set_arm_config(q_init)
-        if not isinstance(q_init, BodyConf): 
-            q_init = BodyConf(sim.robot_bid, q_init)
-    if not isinstance(q_goal, BodyConf): 
-        q_goal = BodyConf(sim.robot_bid, q_goal)
+        if not isinstance(q_init, ArmConf): 
+            q_init = ArmConf(sim, q_init)
+    if not isinstance(q_goal, ArmConf): 
+        q_goal = ArmConf(sim, q_goal)
 
     if verbose:
         print()
@@ -800,24 +835,43 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_init:Optional[Union[float,BodyConf]], q
                         if sim.is_on(sbj, _obj):
                             init += [('Placement', pose, sbj, _obj)]
 
+    goal = []
+    goal += [('AtConf', q_goal)]
+    # goal += [('Holding', 'radish')]
+    # goal += [('On', 'celery', 'stove')]
+    # goal += [('Cooked', 'radish')]
+    assert isinstance(goal, list)
+    if len(goal) == 0:
+        raise ValueError("No goal specified.")
+    elif len(goal) == 1:
+        goal, *_ = goal
+    else:
+        goal = ('and', *goal)
 
-    # goal = ('AtConf', q_goal)
-    goal = ('Holding', 'radish')
-    # goal = ('On', 'celery', 'stove')
-    # goal = ('Cooked', 'radish')
 
     if verbose:
         print(f"\n\nINITIAL STATE")
         for fluent in init:
-            fluent = tuple(
-                (sim.get_name(arg) if isinstance(arg,int) else 
-                tuple(np.round(arg.configuration,3)) if isinstance(arg,BodyConf) else 
-                (sim.get_name(arg.body), *(tuple(np.round(p,3)) for p in arg.pose)) if isinstance(arg, BodyPose) else 
-                arg) for arg in fluent
-            )
-
-            print(fluent)
+            print_fluent(sim, fluent)
+            # fluent = tuple(
+            #     (sim.get_name(arg) if isinstance(arg,int) else 
+            #     tuple(np.round(arg.configuration,3)) if isinstance(arg,BodyConf) else 
+            #     (sim.get_name(arg.body), *(tuple(np.round(p,3)) for p in arg.pose)) if isinstance(arg, BodyPose) else 
+            #     arg) for arg in fluent
+            # )
+            # print(fluent)
         print('\n')
+        print("GOAL STATE")
+        if isinstance(goal, list):
+            for fluent in goal:
+                if fluent != "and":
+                    print_fluent(sim, fluent)
+        elif isinstance(goal, tuple):
+            print_fluent(sim, goal)
+        else:
+            print(goal)
+        print('\n')
+        
 
 
     domain_pddl = read(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'toy_domain.pddl'))
@@ -847,13 +901,14 @@ def get_pddlproblem(sim:ModifiedMiGSI, q_init:Optional[Union[float,BodyConf]], q
 def run_planner(sim:ModifiedMiGSI, 
                 qinit:Optional[Union[float,BodyConf]]=None, 
                 qgoal:Optional[Union[float,BodyConf]]=None, 
+                max_iterations:int=20,
                 debug:bool=False, 
                 print_results:bool=True):
     if qgoal is None: 
         qgoal = sim._robot.tucked_default_joint_pos[sim._arm_joint_control_indices]
 
     problem = get_pddlproblem(sim, qinit, qgoal)
-    solution = solve(problem, unit_costs=True, verbose=debug, debug=debug)
+    solution = solve(problem, unit_costs=True, verbose=debug, debug=debug, max_iterations=max_iterations)
 
     if print_results:
         print(solution.plan)
@@ -1004,7 +1059,7 @@ def main():
         headless=(not GUI), 
         tensor=True,
         let_settle=True,
-        viewer_pose=([-2.2, 4.8, 1.5], [0.6, 0.6, -0.4]),
+        # viewer_pose=([-2.2, 4.8, 1.5], [0.6, 0.6, -0.4]),
         visualize_planning=True,
     )
 
@@ -1013,15 +1068,14 @@ def main():
         #     visualize_sim(sim, debug=DEBUG)
         # else:
         #     loop_and_report_fps(sim.step)
-            
-            
         # sys.exit()
 
 
         qinit = sim._robot.untucked_default_joint_pos[sim._arm_joint_control_indices]
         qgoal = sim._robot.tucked_default_joint_pos[sim._arm_joint_control_indices]
-        # qgoal = sim.as_arm_config(sim.get_position('radish'))
 
+
+        sim.step()
         solution = run_planner(sim, 
                                qinit=qinit,
                                qgoal=qgoal,
@@ -1030,15 +1084,6 @@ def main():
                             )
         plan = solution.plan
         
-        # path = motion_plan(sim, qinit, qgoal, ignore_self_collisions=True)
-        # print(path)
-        # command = ArmCommand(body_paths=[path])
-        # command.execute(time_step=sim.env.simulator.render_timestep, step_sim=True)
-
-        # for q in path.path:
-        #     print(q)
-        # return
-
         
 
         if plan is None:
@@ -1048,7 +1093,6 @@ def main():
             print(plan, "\n")
             if GUI:
                 command = consolidate_plan(plan)
-                # path = plan[0].args[-1].path
                 
                 if USE_CONTROLLERS:
                     wait_for_user('Simulate?')

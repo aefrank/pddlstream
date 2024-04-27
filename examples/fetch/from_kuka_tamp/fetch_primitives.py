@@ -15,6 +15,8 @@ import cv2
 import pybullet as pb
 import numpy as np
 from transforms3d.euler import euler2quat
+from scipy.spatial.transform import Rotation
+
 
 
 # iGibson modules
@@ -34,12 +36,12 @@ from igibson.robots.robot_base import RobotLink
 from igibson.utils.utils import parse_config, quatToXYZW
 from igibson.utils.assets_utils import get_ig_avg_category_specs
 from igibson.object_states.utils import sample_kinematics
-from igibson.utils.grasp_planning_utils import get_grasp_poses_for_object
 from igibson.utils.behavior_robot_motion_planning_utils import HAND_MAX_DISTANCE
 
 
 
 # Custom modules
+from iGibson.igibson.utils.grasp_planning_utils import get_hand_rotation_from_axes
 from utils.object_spec import \
     Kwargs, ObjectSpec, Orientation, Position, Euler, _as_urdf_spec
 from examples.fetch.from_kuka_tamp.utils.utils import \
@@ -1043,6 +1045,111 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
 
     
+
+
+    def get_grasp_poses_for_object(self, target:BID, force_allow_any_extent=True):
+        robot = self._robot
+        target_obj = self.get_object(target)
+
+        GUARANTEED_GRASPABLE_WIDTH = 0.1
+        GRASP_OFFSET = np.array([0, 0, -0.08])  # 5cm back and 8cm up.
+        # GRASP_OFFSET = np.array([0, 0.05, -0.08])  # 5cm back and 8cm up.
+        GRASP_ANGLE = 0.35  # 20 degrees
+        NUM_LATERAL_SAMPLES = 10
+        LATERAL_MARGIN = 0.05
+
+        bbox_center_in_world, bbox_quat_in_world, bbox_extent_in_base_frame, _ = target_obj.get_base_aligned_bounding_box(
+            visual=False
+        )
+
+        # Normally just try to grasp the small-enough dimensions.
+        allow_any_extent = True
+        if not force_allow_any_extent and np.any(bbox_extent_in_base_frame < GUARANTEED_GRASPABLE_WIDTH):
+            allow_any_extent = False
+
+        grasp_candidates = []
+        all_possible_idxes = set(range(3))
+        for pinched_axis_idx in all_possible_idxes:
+            # If we're only accepting correctly-sized sides, let's check that.
+            if not allow_any_extent and bbox_extent_in_base_frame[pinched_axis_idx] > GUARANTEED_GRASPABLE_WIDTH:
+                continue
+
+            # For this side, grab all the possible candidate positions (the other axes).
+            other_axis_idxes = all_possible_idxes - {pinched_axis_idx}
+
+            # For each axis we can go:
+            for palm_normal_axis_idx in other_axis_idxes:
+                positive_option_for_palm_normal = np.eye(3)[palm_normal_axis_idx]
+
+                for possible_side in [positive_option_for_palm_normal, -positive_option_for_palm_normal]:
+                    grasp_center_pos = pb.multiplyTransforms(
+                        bbox_center_in_world,
+                        bbox_quat_in_world,
+                        possible_side * bbox_extent_in_base_frame / 2,
+                        [0, 0, 0, 1],
+                    )[0]
+                    towards_object_in_world_frame = bbox_center_in_world - grasp_center_pos
+                    towards_object_in_world_frame /= np.linalg.norm(towards_object_in_world_frame)
+
+                    # For the rotation, we want to get an orientation that points the palm towards the object.
+                    # The palm normally points downwards in its default position. We fit a rotation to this transform.
+                    palm_normal_in_bbox_frame = -possible_side
+
+                    # We want the hand's backwards axis, e.g. the wrist, (which is Y+) to face closer to the robot.
+                    possible_backward_vectors = []
+                    for facing_side in [-1, 1]:
+                        possible_backward_vectors.append(np.eye(3)[pinched_axis_idx] * facing_side)
+
+                    possible_backward_vectors_in_world = np.array(
+                        [
+                            pb.multiplyTransforms(grasp_center_pos, bbox_quat_in_world, v, [0, 0, 0, 1])[0]
+                            for v in possible_backward_vectors
+                        ]
+                    )
+
+                    backward_vector_distances_to_robot = np.linalg.norm(
+                        possible_backward_vectors_in_world - np.array(robot.get_position())[None, :], axis=1
+                    )
+                    best_wrist_side_in_bbox_frame = possible_backward_vectors[np.argmin(backward_vector_distances_to_robot)]
+
+                    # Fit a rotation to the vectors.
+                    lateral_in_bbox_frame = np.cross(best_wrist_side_in_bbox_frame, palm_normal_in_bbox_frame)
+                    flat_grasp_rot = get_hand_rotation_from_axes(
+                        lateral_in_bbox_frame, best_wrist_side_in_bbox_frame, palm_normal_in_bbox_frame
+                    )
+
+                    # Finally apply our predetermined rotation around the X axis.
+                    bbox_orn_in_world = Rotation.from_quat(bbox_quat_in_world)
+                    unrotated_grasp_orn_in_world_frame = bbox_orn_in_world * flat_grasp_rot
+                    grasp_orn_in_world_frame = unrotated_grasp_orn_in_world_frame * Rotation.from_euler("X", -GRASP_ANGLE)
+                    grasp_quat = grasp_orn_in_world_frame.as_quat()
+
+                    # Now apply the grasp offset.
+                    grasp_pos = grasp_center_pos + unrotated_grasp_orn_in_world_frame.apply(GRASP_OFFSET)
+
+                    # Append the center grasp to our list of candidates.
+                    grasp_pose = (grasp_pos, grasp_quat)
+                    grasp_candidates.append((grasp_pose, towards_object_in_world_frame))
+
+                    # Finally, we want to sample some different grasp candidates that involve lateral movements from
+                    # the center grasp.
+                    # First, compute the range of values we can sample from.
+                    lateral_axis_idx = (other_axis_idxes - {palm_normal_axis_idx}).pop()
+                    half_extent_in_lateral_direction = bbox_extent_in_base_frame[lateral_axis_idx] / 2
+                    lateral_range = half_extent_in_lateral_direction - LATERAL_MARGIN
+                    if lateral_range <= 0:
+                        continue
+
+                    # If there is a valid range, grab some samples from there.
+                    lateral_distance_samples = np.random.uniform(-lateral_range, lateral_range, NUM_LATERAL_SAMPLES)
+                    lateral_in_world_frame = bbox_orn_in_world.apply(lateral_in_bbox_frame)
+                    for lateral_distance in lateral_distance_samples:
+                        offset_grasp_pos = grasp_pos + lateral_distance * lateral_in_world_frame
+                        offset_grasp_pose = (offset_grasp_pos, grasp_quat)
+                        grasp_candidates.append((offset_grasp_pose, towards_object_in_world_frame))
+
+        return grasp_candidates
+
     
 
     ################################################################################
@@ -1063,13 +1170,13 @@ class MyiGibsonSemanticInterface(iGibsonSemanticInterface):
 
     def get_grasp_gen(self):        
         def grasps(body:UID):
-            target_obj:BaseObject = self.get_object(body)
-            grasp_poses:List[Tuple[BodyPose,Orientation]] = get_grasp_poses_for_object(robot=self._robot, target_obj=target_obj, force_allow_any_extent=False)
+            target = self.get_bid(body)
+            grasp_poses:List[Tuple[BodyPose,Orientation]] = self.get_grasp_poses_for_object(target=target, force_allow_any_extent=False)
             for grasp_pose, target_orn in grasp_poses:
                 approach_position = grasp_pose[0] + target_orn * GRASP_APPROACH_DISTANCE
                 approach_pose = (approach_position, grasp_pose[1])
                 body_grasp = BodyGrasp(
-                    body=self.get_bid(target_obj), 
+                    body=target, 
                     grasp_pose=grasp_pose,
                     approach_pose=approach_pose,
                     robot=self.robot_bid,

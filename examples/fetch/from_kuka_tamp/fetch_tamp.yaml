@@ -24,7 +24,7 @@ robot:
   rendering_params: null
   grasping_mode: assisted
   rigid_trunk: false
-  default_trunk_offset: 0.365
+  default_trunk_offset: 0 # 0.365
   # default_arm_pose: diagonal30
   controller_config:
     base:
